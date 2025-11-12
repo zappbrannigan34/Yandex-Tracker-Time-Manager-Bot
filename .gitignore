@@ -23,7 +23,6 @@ logs/*.txt
 
 # Go
 vendor/
-go.sum
 
 # IDE
 .vscode/
