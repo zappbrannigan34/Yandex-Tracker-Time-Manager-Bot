@@ -103,6 +103,20 @@ func (tm *TokenManager) Refresh() error {
 	token, err := tm.getIAMToken()
 	if err != nil {
 		tm.logger.Error("Failed to refresh IAM token", zap.Error(err))
+
+		// If we have an existing token, keep using it even if expired
+		// This allows daemon to continue working if yc CLI requires re-auth
+		tm.mu.RLock()
+		hasExistingToken := tm.token != ""
+		tm.mu.RUnlock()
+
+		if hasExistingToken {
+			tm.logger.Warn("Continuing with existing token despite refresh failure",
+				zap.String("hint", "Run 'yc init' to re-authenticate if needed"))
+			// Don't return error - allow daemon to continue
+			return nil
+		}
+
 		return err
 	}
 
@@ -142,8 +156,31 @@ func (tm *TokenManager) refreshLoop() {
 	}
 }
 
+// checkYCAuth checks if yc CLI is authenticated
+func (tm *TokenManager) checkYCAuth() error {
+	// Try to get current config (non-interactive check)
+	cmd := exec.Command("yc", "config", "list")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("yc CLI not configured or not authenticated")
+	}
+
+	// Check if output contains required fields
+	outputStr := string(output)
+	if !strings.Contains(outputStr, "token:") && !strings.Contains(outputStr, "service-account-key:") {
+		return fmt.Errorf("yc CLI authenticated but no credentials found")
+	}
+
+	return nil
+}
+
 // getIAMToken executes yc CLI command to get IAM token
 func (tm *TokenManager) getIAMToken() (string, error) {
+	// Check yc auth status first (non-interactive)
+	if err := tm.checkYCAuth(); err != nil {
+		return "", fmt.Errorf("authentication check failed: %w (hint: run 'yc init' to re-authenticate)", err)
+	}
+
 	// Parse command (e.g., "yc iam create-token")
 	parts := strings.Fields(tm.cliCommand)
 	if len(parts) == 0 {
@@ -155,7 +192,13 @@ func (tm *TokenManager) getIAMToken() (string, error) {
 	output, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("yc CLI failed: %s: %s", err, string(exitErr.Stderr))
+			stderrMsg := string(exitErr.Stderr)
+			// Check if it's an auth error
+			if strings.Contains(stderrMsg, "not authenticated") ||
+			   strings.Contains(stderrMsg, "authentication") {
+				return "", fmt.Errorf("yc CLI authentication expired: %s (hint: run 'yc init')", stderrMsg)
+			}
+			return "", fmt.Errorf("yc CLI failed: %s: %s", err, stderrMsg)
 		}
 		return "", fmt.Errorf("failed to execute yc CLI: %w", err)
 	}
