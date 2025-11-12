@@ -14,6 +14,7 @@ import (
 	"github.com/username/time-tracker-bot/pkg/dateutil"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var (
@@ -571,19 +572,34 @@ func initLogger() {
 }
 
 func initFileLogger(logFile string, level string) (*zap.Logger, error) {
-	config := zap.NewProductionConfig()
-	config.EncoderConfig.TimeKey = "timestamp"
-	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	config.OutputPaths = []string{logFile}
-	config.ErrorOutputPaths = []string{logFile}
+	// Setup lumberjack for log rotation
+	logWriter := &lumberjack.Logger{
+		Filename:   logFile,
+		MaxSize:    100, // MB
+		MaxBackups: 3,   // Keep max 3 old log files
+		MaxAge:     28,  // days
+		Compress:   true, // Compress old logs with gzip
+	}
 
+	// Setup encoder
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	// Parse log level
 	var zapLevel zapcore.Level
 	if err := zapLevel.UnmarshalText([]byte(level)); err != nil {
 		zapLevel = zapcore.InfoLevel
 	}
-	config.Level = zap.NewAtomicLevelAt(zapLevel)
 
-	return config.Build()
+	// Create core with lumberjack writer
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(logWriter),
+		zapLevel,
+	)
+
+	return zap.New(core), nil
 }
 
 func getIcon(dryRun bool) string {

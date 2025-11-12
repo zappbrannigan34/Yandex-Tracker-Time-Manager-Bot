@@ -1,0 +1,90 @@
+# Yandex Tracker Time Manager Configuration
+# Copy this file to config.yaml and fill in your values
+
+tracker:
+  # Organization ID from https://tracker.yandex.ru/admin/orgs
+  org_id: "your-org-id-here"
+
+  # API endpoint (default)
+  api_endpoint: "https://api.tracker.yandex.net"
+
+  # Board ID for fetching tasks
+  board_id: 123
+
+  # Query for finding issues in progress or resolved today
+  issues_query: "Boards: 123 AND Assignee: me() AND (Status: \"inProgress\" OR Resolved: today()) AND Type: story, task, bug"
+
+# Production Calendar Configuration
+calendar:
+  # Calendar type: "isdayoff" (default, free) or "production-calendar" (legacy, requires paid token)
+  type: "isdayoff"
+
+  # Fallback URL for offline calendar data (xmlcalendar.ru)
+  # {year} will be replaced with actual year (e.g., 2025)
+  fallback_url: "https://xmlcalendar.ru/data/ru/{year}/calendar.json"
+
+  # Cache TTL for calendar data
+  cache_ttl: "24h"
+
+# Time Distribution Rules
+time_rules:
+  # Target working hours per day (usually 8)
+  target_hours_per_day: 8
+
+  # Daily tasks (fixed time every working day)
+  daily_tasks:
+    - issue: "PROJECT-123"
+      minutes: 30
+      description: "Daily standup"
+
+    - issue: "PROJECT-456"
+      minutes: 15
+      description: "Team sync"
+
+  # Weekly tasks (random 2 days per week)
+  weekly_tasks:
+    - issue: "PROJECT-789"
+      hours_per_week: 8
+      days_per_week: 2
+      description: "Weekly infrastructure tasks"
+
+    - issue: "PROJECT-999"
+      hours_per_week: 2
+      days_per_week: 2
+      description: "Weekly administrative tasks"
+
+  # Randomization percentage (±10%)
+  randomization_percent: 10.0
+
+# Daemon Mode Configuration
+daemon:
+  # ⚙️ Daily sync time (HH:MM format, MSK timezone UTC+3)
+  # Runs time sync once per day at the specified time
+  daily_time: "20:00"
+
+  # 🪟 Windows: Show system tray icon with menu (Sync Now, Status, Quit)
+  system_tray: true
+
+  # Log file path (with automatic rotation)
+  # Rotation: max 100MB per file, keep 3 backups, compress old logs, delete after 28 days
+  log_file: "./logs/time-tracker-bot.log"
+
+  # Log level: debug, info, warn, error
+  log_level: "info"
+
+# IAM Token Configuration
+iam:
+  # How often to refresh IAM token
+  # Yandex recommends refreshing every hour
+  # (token lifetime is max 12 hours)
+  refresh_interval: "1h"
+
+  # CLI command to get IAM token
+  # Linux/macOS: "/path/to/yc iam create-token"
+  # Windows: "C:/Users/username/yandex-cloud/bin/yc.exe iam create-token"
+  cli_command: "/path/to/yc iam create-token"
+
+# State Storage
+state:
+  # File to store weekly schedule state
+  weekly_schedule_file: "./state/weekly_schedule.json"

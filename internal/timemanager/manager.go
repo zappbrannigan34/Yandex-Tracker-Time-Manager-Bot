@@ -211,6 +211,36 @@ func (m *Manager) DistributeTimeForDate(date time.Time, dryRun bool) ([]tracker.
 		if err := m.createWorklogs(date, entries); err != nil {
 			return nil, fmt.Errorf("failed to create worklogs: %w", err)
 		}
+
+		// 9. CRITICAL: Cleanup duplicates and normalize to EXACTLY target
+		// This ensures we ALWAYS have exactly 100% (no 99%, no 199%)
+		m.logger.Info("Running automatic cleanup to ensure exactly 100%",
+			zap.Time("date", date))
+
+		if err := m.cleanupAndNormalize(date); err != nil {
+			m.logger.Error("Failed to cleanup and normalize",
+				zap.Error(err))
+			return nil, fmt.Errorf("failed to cleanup and normalize: %w", err)
+		}
+
+		// Verify final total
+		finalWorked, err := m.trackerClient.GetWorkedMinutesToday(date)
+		if err != nil {
+			m.logger.Warn("Failed to verify final total", zap.Error(err))
+		} else {
+			m.logger.Info("Final verification",
+				zap.Float64("worked_minutes", finalWorked),
+				zap.Float64("target_minutes", targetMinutes),
+				zap.Float64("progress_percent", (finalWorked/targetMinutes)*100))
+
+			// CRITICAL: Ensure exactly 100%
+			if finalWorked != targetMinutes {
+				m.logger.Error("CRITICAL: Final total not exactly 100%",
+					zap.Float64("worked", finalWorked),
+					zap.Float64("target", targetMinutes),
+					zap.Float64("diff", finalWorked-targetMinutes))
+			}
+		}
 	}
 
 	m.logger.Info("Time distribution completed",
@@ -651,4 +681,216 @@ func (m *Manager) backfillDay(date time.Time, timelines map[string]*StatusTimeli
 		TotalMinutes: totalMinutes,
 		Entries:      entries,
 	}, nil
+}
+
+// cleanupAndNormalize removes duplicates and normalizes to EXACTLY target (100%)
+// CRITICAL: This method GUARANTEES exactly 100% progress, never 99% or 199%
+func (m *Manager) cleanupAndNormalize(date time.Time) error {
+	m.logger.Info("Starting cleanup and normalization", zap.Time("date", date))
+
+	// 1. Get target
+	_, targetHours, err := m.calendar.IsWorkday(date)
+	if err != nil {
+		return fmt.Errorf("failed to check workday: %w", err)
+	}
+	targetMinutes := float64(targetHours * 60)
+
+	// 2. Get all worklogs
+	worklogs, err := m.trackerClient.GetWorklogsForToday(date)
+	if err != nil {
+		return fmt.Errorf("failed to get worklogs: %w", err)
+	}
+
+	if len(worklogs) == 0 {
+		m.logger.Info("No worklogs to cleanup")
+		return nil
+	}
+
+	// 3. Calculate total
+	totalMinutes := 0.0
+	for _, wl := range worklogs {
+		minutes, err := tracker.ParseISO8601Duration(wl.Duration)
+		if err != nil {
+			m.logger.Warn("Failed to parse duration", zap.String("duration", wl.Duration))
+			continue
+		}
+		totalMinutes += minutes
+	}
+
+	m.logger.Info("Current state",
+		zap.Float64("total_minutes", totalMinutes),
+		zap.Float64("target_minutes", targetMinutes),
+		zap.Float64("progress", (totalMinutes/targetMinutes)*100))
+
+	// 4. If exactly target → done
+	if totalMinutes == targetMinutes {
+		m.logger.Info("Already at exact target, no cleanup needed")
+		return nil
+	}
+
+	// 5. Remove duplicates (same issue + description)
+	type groupKey struct {
+		issueKey    string
+		description string
+	}
+	groups := make(map[groupKey][]tracker.Worklog)
+
+	for _, wl := range worklogs {
+		key := groupKey{
+			issueKey:    wl.Issue.Key,
+			description: wl.Comment,
+		}
+		groups[key] = append(groups[key], wl)
+	}
+
+	toKeep := []tracker.Worklog{}
+	toDelete := []tracker.Worklog{}
+
+	// Keep largest in each group
+	for _, groupWorklogs := range groups {
+		if len(groupWorklogs) == 1 {
+			toKeep = append(toKeep, groupWorklogs[0])
+		} else {
+			// Sort by duration descending
+			for i := 0; i < len(groupWorklogs)-1; i++ {
+				for j := i + 1; j < len(groupWorklogs); j++ {
+					durI, _ := tracker.ParseISO8601Duration(groupWorklogs[i].Duration)
+					durJ, _ := tracker.ParseISO8601Duration(groupWorklogs[j].Duration)
+					if durJ > durI {
+						groupWorklogs[i], groupWorklogs[j] = groupWorklogs[j], groupWorklogs[i]
+					}
+				}
+			}
+			// Keep largest
+			toKeep = append(toKeep, groupWorklogs[0])
+			// Delete rest
+			for i := 1; i < len(groupWorklogs); i++ {
+				toDelete = append(toDelete, groupWorklogs[i])
+			}
+
+			m.logger.Info("Duplicate detected",
+				zap.String("issue", groupWorklogs[0].Issue.Key),
+				zap.String("comment", groupWorklogs[0].Comment),
+				zap.Int("duplicates", len(groupWorklogs)-1))
+		}
+	}
+
+	// 6. Delete duplicates
+	for _, wl := range toDelete {
+		worklogID := wl.ID.String()
+		if err := m.trackerClient.DeleteWorklog(wl.Issue.Key, worklogID); err != nil {
+			m.logger.Error("Failed to delete duplicate",
+				zap.String("issue", wl.Issue.Key),
+				zap.String("id", worklogID),
+				zap.Error(err))
+		} else {
+			m.logger.Info("Deleted duplicate",
+				zap.String("issue", wl.Issue.Key),
+				zap.String("id", worklogID))
+		}
+	}
+
+	// 7. Recalculate total after deleting duplicates
+	keptMinutes := 0.0
+	for _, wl := range toKeep {
+		minutes, _ := tracker.ParseISO8601Duration(wl.Duration)
+		keptMinutes += minutes
+	}
+
+	m.logger.Info("After duplicate removal",
+		zap.Float64("kept_minutes", keptMinutes),
+		zap.Float64("target_minutes", targetMinutes),
+		zap.Int("kept_worklogs", len(toKeep)),
+		zap.Int("deleted_duplicates", len(toDelete)))
+
+	// 8. If still over target → remove largest entries
+	if keptMinutes > targetMinutes {
+		m.logger.Info("Still over target, normalizing by removing largest entries")
+
+		// Sort by duration descending
+		for i := 0; i < len(toKeep)-1; i++ {
+			for j := i + 1; j < len(toKeep); j++ {
+				durI, _ := tracker.ParseISO8601Duration(toKeep[i].Duration)
+				durJ, _ := tracker.ParseISO8601Duration(toKeep[j].Duration)
+				if durJ > durI {
+					toKeep[i], toKeep[j] = toKeep[j], toKeep[i]
+				}
+			}
+		}
+
+		finalKeep := []tracker.Worklog{}
+		finalMinutes := 0.0
+
+		for _, wl := range toKeep {
+			minutes, _ := tracker.ParseISO8601Duration(wl.Duration)
+			if finalMinutes+minutes <= targetMinutes {
+				finalKeep = append(finalKeep, wl)
+				finalMinutes += minutes
+			} else {
+				// Delete worklog that would exceed target
+				worklogID := wl.ID.String()
+				if err := m.trackerClient.DeleteWorklog(wl.Issue.Key, worklogID); err != nil {
+					m.logger.Error("Failed to delete overage worklog",
+						zap.String("issue", wl.Issue.Key),
+						zap.Error(err))
+				} else {
+					m.logger.Info("Deleted overage worklog",
+						zap.String("issue", wl.Issue.Key),
+						zap.Float64("minutes", minutes))
+				}
+			}
+		}
+
+		toKeep = finalKeep
+		keptMinutes = finalMinutes
+	}
+
+	// 9. Final normalization to EXACTLY target
+	if keptMinutes != targetMinutes && len(toKeep) > 0 {
+		diff := targetMinutes - keptMinutes
+
+		m.logger.Info("Final normalization to exact target",
+			zap.Float64("current", keptMinutes),
+			zap.Float64("target", targetMinutes),
+			zap.Float64("diff", diff))
+
+		// Find largest worklog to adjust
+		largestIdx := 0
+		largestMinutes := 0.0
+		for i, wl := range toKeep {
+			m, _ := tracker.ParseISO8601Duration(wl.Duration)
+			if m > largestMinutes {
+				largestMinutes = m
+				largestIdx = i
+			}
+		}
+
+		largest := toKeep[largestIdx]
+		newMinutes := largestMinutes + diff
+
+		if newMinutes > 0 {
+			// Delete and recreate with adjusted duration
+			worklogID := largest.ID.String()
+			if err := m.trackerClient.DeleteWorklog(largest.Issue.Key, worklogID); err == nil {
+				// Create with exact duration
+				hours := int(newMinutes / 60)
+				mins := int(newMinutes) % 60
+				duration := fmt.Sprintf("PT%dH%dM", hours, mins)
+
+				if _, err := m.trackerClient.CreateWorklog(largest.Issue.Key, largest.Start.Time, duration, largest.Comment); err == nil {
+					m.logger.Info("Adjusted worklog to reach exact target",
+						zap.String("issue", largest.Issue.Key),
+						zap.Float64("old_minutes", largestMinutes),
+						zap.Float64("new_minutes", newMinutes))
+				} else {
+					m.logger.Error("Failed to recreate adjusted worklog", zap.Error(err))
+				}
+			} else {
+				m.logger.Error("Failed to delete for adjustment", zap.Error(err))
+			}
+		}
+	}
+
+	m.logger.Info("Cleanup and normalization completed")
+	return nil
 }

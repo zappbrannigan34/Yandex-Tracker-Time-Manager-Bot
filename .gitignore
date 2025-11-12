@@ -10,6 +10,9 @@ dist/
 config.yaml
 .env
 
+# Documentation with sensitive data
+REQUIREMENTS.md
+
 # State
 state/weekly_schedule.json
 

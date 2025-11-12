@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,7 +25,10 @@ type Daemon struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	trayApp       *TrayApp
-	lastRunDate   string // Track last successful run date to avoid duplicates
+	lastRunDate   string    // Track last successful run date to avoid duplicates
+	lastRunTime   time.Time // Track last successful run time
+	mu            sync.Mutex // Protect against concurrent runs
+	syncRunning   bool      // Flag to prevent concurrent sync operations
 }
 
 // NewDaemon creates a new daemon instance with interval-based checks (deprecated)
@@ -358,19 +362,47 @@ func (d *Daemon) shouldRunAt(now time.Time) bool {
 }
 
 // runSync executes the time sync operation for today
+// CRITICAL: Protected with mutex to prevent concurrent runs that could create duplicates
 func (d *Daemon) runSync() error {
-	date := dateutil.Today()
+	// IDEMPOTENT PROTECTION: Lock to prevent concurrent sync
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	d.logger.Info("Running sync for today", zap.Time("date", date))
+	// Check if sync is already running
+	if d.syncRunning {
+		d.logger.Warn("Sync already running, skipping concurrent execution")
+		return fmt.Errorf("sync already in progress")
+	}
 
-	entries, err := d.manager.DistributeTimeForDate(date, false)
+	// Check if already ran today
+	today := dateutil.Today()
+	todayStr := today.Format("2006-01-02")
+	if d.lastRunDate == todayStr {
+		d.logger.Info("Already ran sync today, skipping to prevent duplicates",
+			zap.String("last_run_date", d.lastRunDate),
+			zap.Time("last_run_time", d.lastRunTime))
+		return nil
+	}
+
+	// Mark sync as running
+	d.syncRunning = true
+	defer func() {
+		d.syncRunning = false
+	}()
+
+	d.logger.Info("Running sync for today", zap.Time("date", today))
+
+	entries, err := d.manager.DistributeTimeForDate(today, false)
 	if err != nil {
 		return fmt.Errorf("failed to distribute time: %w", err)
 	}
 
 	if len(entries) == 0 {
 		d.logger.Info("No time entries created (either non-workday or already worked enough)",
-			zap.Time("date", date))
+			zap.Time("date", today))
+		// Still update lastRunDate to prevent retrying on non-workday
+		d.lastRunDate = todayStr
+		d.lastRunTime = time.Now()
 		return nil
 	}
 
@@ -383,7 +415,11 @@ func (d *Daemon) runSync() error {
 		zap.Int("entries", len(entries)),
 		zap.Float64("total_minutes", totalMinutes),
 		zap.Float64("total_hours", totalMinutes/60),
-		zap.Time("date", date))
+		zap.Time("date", today))
+
+	// Update last run info to prevent duplicate runs
+	d.lastRunDate = todayStr
+	d.lastRunTime = time.Now()
 
 	return nil
 }
@@ -401,7 +437,6 @@ func (d *Daemon) SyncNow() {
 		if d.trayApp != nil {
 			d.trayApp.ShowNotification("Sync Completed", "Time logged successfully")
 		}
-		// Update last run date to prevent duplicate run at scheduled time
-		d.lastRunDate = time.Now().Format("2006-01-02")
+		// lastRunDate is updated inside runSync() - no need to update here
 	}
 }
