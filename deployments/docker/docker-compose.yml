@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  time-tracker-bot:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+    container_name: time-tracker-bot
+    restart: unless-stopped
+
+    environment:
+      - TRACKER_ORG_ID=${TRACKER_ORG_ID}
+      - CALENDAR_API_TOKEN=${CALENDAR_API_TOKEN}
+
+    volumes:
+      # Config file
+      - ./config.yaml:/app/config.yaml:ro
+
+      # State and logs (persistent)
+      - time-tracker-state:/app/state
+      - time-tracker-logs:/app/logs
+
+      # Calendar fallback data
+      - ../../data:/app/data:ro
+
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "time-tracker-bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  time-tracker-state:
+    driver: local
+  time-tracker-logs:
+    driver: local

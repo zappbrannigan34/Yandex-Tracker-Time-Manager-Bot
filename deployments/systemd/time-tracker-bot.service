@@ -1,0 +1,39 @@
+[Unit]
+Description=Yandex Tracker Time Manager
+Documentation=https://github.com/username/time-tracker-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tracker
+Group=tracker
+WorkingDirectory=/opt/time-tracker-bot
+
+# Environment variables
+Environment="TRACKER_ORG_ID=your-org-id"
+
+# Start daemon
+ExecStart=/opt/time-tracker-bot/time-tracker-bot daemon --config /opt/time-tracker-bot/config.yaml
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=time-tracker-bot
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/time-tracker-bot/state /opt/time-tracker-bot/logs
+
+[Install]
+WantedBy=multi-user.target

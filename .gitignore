@@ -1,0 +1,34 @@
+# Binaries (root level only)
+/time-tracker-bot
+/time-tracker-bot.exe
+dist/
+*.exe
+*.test
+*.prof
+
+# Config files
+config.yaml
+.env
+
+# State
+state/weekly_schedule.json
+
+# Logs
+logs/*.log
+logs/*.txt
+!logs/.gitkeep
+
+# Go
+vendor/
+go.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
