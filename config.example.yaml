@@ -93,10 +93,11 @@ daemon:
 
 # IAM Token Configuration
 iam:
-  # How often to refresh IAM token
-  # Yandex recommends refreshing every hour
-  # (token lifetime is max 12 hours)
-  refresh_interval: "1h"
+  # How often to CHECK if token needs refresh
+  # Token will only be refreshed if it expires in less than 1 hour
+  # IAM tokens live up to 12 hours
+  # Recommended: check every 1-6 hours (default: 6h)
+  refresh_interval: "6h"
 
   # CLI command to get IAM token
   cli_command: "yc iam create-token"

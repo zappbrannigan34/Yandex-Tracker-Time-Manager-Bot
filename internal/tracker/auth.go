@@ -13,14 +13,16 @@ import (
 
 // TokenManager manages IAM token lifecycle
 type TokenManager struct {
-	mu            sync.RWMutex
-	token         string
-	lastRefresh   time.Time
+	mu              sync.RWMutex
+	token           string
+	lastRefresh     time.Time
+	expiresAt       time.Time // Token expiration time
+	tokenLifetime   time.Duration // Token lifetime (12 hours for IAM tokens)
 	refreshInterval time.Duration
-	cliCommand    string
-	logger        *zap.Logger
-	ctx           context.Context
-	cancel        context.CancelFunc
+	cliCommand      string
+	logger          *zap.Logger
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 // NewTokenManager creates a new token manager
@@ -28,6 +30,7 @@ func NewTokenManager(refreshInterval time.Duration, cliCommand string, logger *z
 	ctx, cancel := context.WithCancel(context.Background())
 
 	tm := &TokenManager{
+		tokenLifetime:   12 * time.Hour, // IAM tokens live up to 12 hours
 		refreshInterval: refreshInterval,
 		cliCommand:      cliCommand,
 		logger:          logger,
@@ -72,21 +75,50 @@ func (tm *TokenManager) GetToken() (string, error) {
 	return tm.token, nil
 }
 
+// IsTokenValid checks if current token is still valid
+// Token is considered valid if it has more than 1 hour until expiration
+func (tm *TokenManager) IsTokenValid() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	if tm.token == "" {
+		return false
+	}
+
+	// Check if token expires in less than 1 hour
+	timeUntilExpiry := time.Until(tm.expiresAt)
+	return timeUntilExpiry > time.Hour
+}
+
 // Refresh refreshes the IAM token
 func (tm *TokenManager) Refresh() error {
+	// Check if token is still valid
+	if tm.IsTokenValid() {
+		tm.logger.Debug("Token is still valid, skipping refresh",
+			zap.Time("expires_at", tm.expiresAt),
+			zap.Duration("time_until_expiry", time.Until(tm.expiresAt)))
+		return nil
+	}
+
 	token, err := tm.getIAMToken()
 	if err != nil {
 		tm.logger.Error("Failed to refresh IAM token", zap.Error(err))
 		return err
 	}
 
+	now := time.Now()
+	expiresAt := now.Add(tm.tokenLifetime)
+
 	tm.mu.Lock()
 	tm.token = token
-	tm.lastRefresh = time.Now()
+	tm.lastRefresh = now
+	tm.expiresAt = expiresAt
 	tm.mu.Unlock()
 
 	tm.logger.Info("IAM token refreshed successfully",
-		zap.Time("last_refresh", tm.lastRefresh))
+		zap.Time("last_refresh", now),
+		zap.Time("expires_at", expiresAt),
+		zap.Duration("lifetime", tm.tokenLifetime))
 
 	return nil
 }
