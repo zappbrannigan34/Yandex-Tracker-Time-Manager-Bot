@@ -44,6 +44,7 @@ type TimeRulesConfig struct {
 	TargetHoursPerDay     int                 `mapstructure:"target_hours_per_day"`
 	DailyTasks            []DailyTaskConfig   `mapstructure:"daily_tasks"`
 	WeeklyTasks           []WeeklyTaskConfig  `mapstructure:"weekly_tasks"`
+	BoardTasks            BoardTasksConfig    `mapstructure:"board_tasks"`
 	RandomizationPercent  float64             `mapstructure:"randomization_percent"`
 }
 
@@ -60,6 +61,15 @@ type WeeklyTaskConfig struct {
 	HoursPerWeek  float64 `mapstructure:"hours_per_week"`
 	DaysPerWeek   int     `mapstructure:"days_per_week"`
 	Description   string  `mapstructure:"description"`
+}
+
+// BoardTasksConfig represents board tasks configuration
+type BoardTasksConfig struct {
+	Enabled                  bool    `mapstructure:"enabled"`
+	BaseMinutesPerDay        int     `mapstructure:"base_minutes_per_day"`
+	RandomizationPercent     float64 `mapstructure:"randomization_percent"`
+	TasksPercent             float64 `mapstructure:"tasks_percent"`
+	TasksRandomizationPercent float64 `mapstructure:"tasks_randomization_percent"`
 }
 
 // DaemonConfig represents daemon mode configuration
@@ -165,6 +175,22 @@ func (c *Config) Validate() error {
 	}
 	if c.TimeRules.RandomizationPercent < 0 || c.TimeRules.RandomizationPercent > 100 {
 		return fmt.Errorf("time_rules.randomization_percent must be between 0 and 100")
+	}
+
+	// Validate BoardTasks config
+	if c.TimeRules.BoardTasks.Enabled {
+		if c.TimeRules.BoardTasks.BaseMinutesPerDay < 0 {
+			return fmt.Errorf("time_rules.board_tasks.base_minutes_per_day must be non-negative")
+		}
+		if c.TimeRules.BoardTasks.RandomizationPercent < 0 || c.TimeRules.BoardTasks.RandomizationPercent > 100 {
+			return fmt.Errorf("time_rules.board_tasks.randomization_percent must be between 0 and 100")
+		}
+		if c.TimeRules.BoardTasks.TasksPercent < 0 || c.TimeRules.BoardTasks.TasksPercent > 100 {
+			return fmt.Errorf("time_rules.board_tasks.tasks_percent must be between 0 and 100")
+		}
+		if c.TimeRules.BoardTasks.TasksRandomizationPercent < 0 || c.TimeRules.BoardTasks.TasksRandomizationPercent > 100 {
+			return fmt.Errorf("time_rules.board_tasks.tasks_randomization_percent must be between 0 and 100")
+		}
 	}
 
 	// Validate IAM config

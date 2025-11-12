@@ -59,6 +59,15 @@ func (c *Client) SearchIssues(query string) ([]Issue, error) {
 	return issues, nil
 }
 
+// GetAllBoardIssues returns all issues from board regardless of status
+func (c *Client) GetAllBoardIssues(boardID int) ([]Issue, error) {
+	// Query: get all issues from board, assigned to current user
+	// No status filter - includes all statuses (open, in progress, closed, etc.)
+	query := fmt.Sprintf("Boards: %d AND Assignee: me()", boardID)
+
+	return c.SearchIssues(query)
+}
+
 // GetCurrentUser returns current authenticated user info (cached)
 func (c *Client) GetCurrentUser() (*User, error) {
 	if c.currentUser != nil {

@@ -9,6 +9,7 @@
 - ✅ Автоматическое списание до 8 часов в рабочий день
 - ✅ Интеграция с производственным календарём РФ (isdayoff.ru)
 - ✅ Поддержка ежедневных и еженедельных задач с фиксированным временем
+- ✅ **Случайное распределение времени на задачи с доски** (board_tasks)
 - ✅ Распределение оставшегося времени по открытым задачам
 - ✅ Рандомизация времени ±1% для естественности
 - ✅ 3 режима работы: daemon, cron/Task Scheduler, CLI
@@ -305,8 +306,9 @@ Yandex Tracker использует **BUSINESS time units**:
 │   CLI / Daemon / Cron Modes             │
 ├─────────────────────────────────────────┤
 │  Time Manager Core                      │
-│   ├── Daily Tasks (60 min)              │
-│   ├── Weekly Tasks (0-5 hours)          │
+│   ├── Daily Tasks (fixed time)          │
+│   ├── Weekly Tasks (scheduled days)     │
+│   ├── Board Tasks (random selection)    │
 │   └── Remaining Time → Open Issues      │
 ├─────────────────────────────────────────┤
 │  Calendar Module                        │
@@ -315,6 +317,7 @@ Yandex Tracker использует **BUSINESS time units**:
 ├─────────────────────────────────────────┤
 │  Tracker API Client                     │
 │   ├── Search Issues                     │
+│   ├── Get All Board Issues              │
 │   ├── Get Current User (SSO support)    │
 │   ├── Get Worklogs (user filtering)     │
 │   └── Create Worklog                    │
@@ -338,14 +341,24 @@ tracker:
 
 time_rules:
   target_hours_per_day: 8
+
   daily_tasks:
     - issue: "PROJ-101"
       minutes: 30
       description: "Daily standup"
+
   weekly_tasks:
     - issue: "PROJ-201"
       hours_per_week: 8
       days_per_week: 2
+
+  # Опциональное случайное распределение времени на задачи с доски
+  board_tasks:
+    enabled: false                      # включить/выключить
+    base_minutes_per_day: 30            # базовое время (например, 30 минут)
+    randomization_percent: 40.0         # рандомизация времени ±40% (18-42 мин)
+    tasks_percent: 20.0                 # процент задач от доски (20%)
+    tasks_randomization_percent: 40.0   # рандомизация количества ±40%
 
 iam:
   refresh_interval: "1h"

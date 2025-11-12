@@ -122,6 +122,22 @@ func (m *Manager) DistributeTimeForDate(date time.Time, dryRun bool) ([]tracker.
 		zap.Int("count", len(weeklyEntries)),
 		zap.Float64("remaining_minutes", remainingMinutes))
 
+	// 4.5. Board tasks (random tasks from board)
+	if m.config.TimeRules.BoardTasks.Enabled && remainingMinutes > 0 {
+		boardEntries, boardMinutes, err := m.distributeBoardTasks(date)
+		if err != nil {
+			return nil, fmt.Errorf("failed to distribute board tasks: %w", err)
+		}
+
+		entries = append(entries, boardEntries...)
+		remainingMinutes -= boardMinutes
+
+		m.logger.Info("Board tasks distributed",
+			zap.Float64("total_minutes", boardMinutes),
+			zap.Int("count", len(boardEntries)),
+			zap.Float64("remaining_minutes", remainingMinutes))
+	}
+
 	// 5. Get open issues from board
 	if remainingMinutes > 0 {
 		issues, err := m.trackerClient.SearchIssues(m.config.Tracker.IssuesQuery)
@@ -893,4 +909,83 @@ func (m *Manager) cleanupAndNormalize(date time.Time) error {
 
 	m.logger.Info("Cleanup and normalization completed")
 	return nil
+}
+
+// distributeBoardTasks distributes random time across random tasks from board
+func (m *Manager) distributeBoardTasks(date time.Time) ([]tracker.TimeEntry, float64, error) {
+	cfg := m.config.TimeRules.BoardTasks
+
+	// Calculate random time to distribute
+	baseMinutes := float64(cfg.BaseMinutesPerDay)
+	totalMinutes := random.Randomize(baseMinutes, cfg.RandomizationPercent)
+
+	if totalMinutes <= 0 {
+		return nil, 0, nil
+	}
+
+	// Get all issues from board (regardless of status)
+	allIssues, err := m.trackerClient.GetAllBoardIssues(m.config.Tracker.BoardID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get board issues: %w", err)
+	}
+
+	if len(allIssues) == 0 {
+		m.logger.Warn("No issues found on board for board_tasks")
+		return nil, 0, nil
+	}
+
+	// Exclude fixed tasks (daily + weekly)
+	allIssues = m.excludeFixedTasks(allIssues)
+
+	if len(allIssues) == 0 {
+		m.logger.Warn("All board issues are fixed tasks, skipping board_tasks")
+		return nil, 0, nil
+	}
+
+	// Calculate number of tasks to select
+	baseTaskCount := int(float64(len(allIssues)) * cfg.TasksPercent / 100.0)
+	if baseTaskCount < 1 {
+		baseTaskCount = 1
+	}
+	taskCount := random.RandomizeInt(baseTaskCount, cfg.TasksRandomizationPercent)
+	if taskCount < 1 {
+		taskCount = 1
+	}
+	if taskCount > len(allIssues) {
+		taskCount = len(allIssues)
+	}
+
+	m.logger.Info("Board tasks calculation",
+		zap.Int("total_board_issues", len(allIssues)),
+		zap.Int("selected_task_count", taskCount),
+		zap.Float64("total_minutes", totalMinutes))
+
+	// Select random tasks
+	selectedIndices := random.SelectRandomItems(len(allIssues), taskCount)
+
+	// Distribute time with randomization
+	timeDistribution := random.DistributeWithRandomization(totalMinutes, taskCount, cfg.RandomizationPercent)
+
+	// Create entries
+	entries := make([]tracker.TimeEntry, 0, taskCount)
+	actualTotal := 0.0
+
+	for i, idx := range selectedIndices {
+		issue := allIssues[idx]
+		minutes := timeDistribution[i]
+
+		entries = append(entries, tracker.TimeEntry{
+			IssueKey: issue.Key,
+			Minutes:  minutes,
+			Comment:  fmt.Sprintf("Board task (auto-distributed on %s)", date.Format("2006-01-02")),
+		})
+
+		actualTotal += minutes
+
+		m.logger.Debug("Board task selected",
+			zap.String("issue", issue.Key),
+			zap.Float64("minutes", minutes))
+	}
+
+	return entries, actualTotal, nil
 }

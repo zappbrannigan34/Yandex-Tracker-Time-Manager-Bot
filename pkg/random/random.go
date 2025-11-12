@@ -82,3 +82,70 @@ func SelectRandomWeekdayDates(week time.Time, n int) []time.Time {
 
 	return dates
 }
+
+// SelectRandomItems selects n random items from slice
+// Returns indices of selected items
+func SelectRandomItems(totalCount, n int) []int {
+	if n <= 0 || totalCount <= 0 {
+		return []int{}
+	}
+
+	if n >= totalCount {
+		// Return all indices
+		indices := make([]int, totalCount)
+		for i := range indices {
+			indices[i] = i
+		}
+		return indices
+	}
+
+	// Create slice of all indices
+	allIndices := make([]int, totalCount)
+	for i := range allIndices {
+		allIndices[i] = i
+	}
+
+	// Shuffle using Fisher-Yates algorithm
+	for i := len(allIndices) - 1; i > 0; i-- {
+		j := rand.Intn(i + 1)
+		allIndices[i], allIndices[j] = allIndices[j], allIndices[i]
+	}
+
+	// Return first n indices
+	return allIndices[:n]
+}
+
+// DistributeWithRandomization distributes total value across n items with randomization
+// Each item gets approximately total/n with ±randomizationPercent variance
+// Returns slice of n values that sum to approximately total
+func DistributeWithRandomization(total float64, n int, randomizationPercent float64) []float64 {
+	if n <= 0 {
+		return []float64{}
+	}
+
+	if n == 1 {
+		return []float64{total}
+	}
+
+	// Base value per item
+	baseValue := total / float64(n)
+
+	// Generate randomized values
+	values := make([]float64, n)
+	sum := 0.0
+	for i := 0; i < n; i++ {
+		values[i] = Randomize(baseValue, randomizationPercent)
+		sum += values[i]
+	}
+
+	// Adjust to match total exactly (distribute the difference proportionally)
+	if sum > 0 {
+		factor := total / sum
+		for i := range values {
+			values[i] *= factor
+			values[i] = math.Round(values[i]*100) / 100 // Round to 2 decimal places
+		}
+	}
+
+	return values
+}

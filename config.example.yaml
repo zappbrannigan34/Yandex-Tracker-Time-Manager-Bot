@@ -56,6 +56,24 @@ time_rules:
   # Randomization percentage (±10%)
   randomization_percent: 10.0
 
+  # Board tasks (optional) - distribute random time across random tasks from board
+  # Example: spend 30±40% minutes on 20±40% of board tasks daily
+  board_tasks:
+    # Enable board tasks distribution
+    enabled: false
+
+    # Base minutes per day to distribute across random board tasks
+    base_minutes_per_day: 30
+
+    # Randomization for time (±40% = 18-42 minutes)
+    randomization_percent: 40.0
+
+    # Percentage of tasks to select from board (20% of all tasks)
+    tasks_percent: 20.0
+
+    # Randomization for task count (±40% = 12-28% of tasks)
+    tasks_randomization_percent: 40.0
+
 # Daemon Mode Configuration
 daemon:
   # ⚙️ Daily sync time (HH:MM format, MSK timezone UTC+3)
