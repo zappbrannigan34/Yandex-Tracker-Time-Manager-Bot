@@ -2,8 +2,6 @@
 
 Автоматическое списание времени в Yandex Tracker с учётом производственного календаря РФ.
 
-**⚠️ ПРИ ПОТЕРЕ ПАМЯТИ:** Читать [REQUIREMENTS.md](./REQUIREMENTS.md) ПЕРВЫМ!
-
 ---
 
 ## Возможности
@@ -128,8 +126,6 @@ notepad config.yaml
 1. Открыть https://tracker.yandex.ru/admin/orgs
 2. Скопировать Organization ID
 3. Указать в `config.yaml` → `tracker.org_id`
-
-**Подробности:** См. [REQUIREMENTS.md](./REQUIREMENTS.md) → "КРИТИЧЕСКИЕ НАХОДКИ ДЛЯ SSO"
 
 ---
 
@@ -273,8 +269,6 @@ daemon:
    - **Actions:** Start program: `C:\path\to\time-tracker-bot.exe`, Arguments: `daemon`
    - **Settings:** Allow task to run on demand, Stop task if runs longer than 3 days
 
-Подробнее см. [REQUIREMENTS.md](./REQUIREMENTS.md)
-
 **Linux/macOS: systemd service**
 
 ```bash
@@ -408,8 +402,6 @@ yc init --federation-id=<your-federation-id>
 
 ### Ошибка 403/401 от Tracker API
 
-**Для SSO/Cloud Organizations:** См. [REQUIREMENTS.md](./REQUIREMENTS.md) → "КРИТИЧЕСКИЕ НАХОДКИ"
-
 Краткая проверка:
 1. `yc config list` - проверить авторизацию
 2. `yc iam create-token` - проверить создание токена
@@ -435,19 +427,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 ./time-tracker-bot sync --dry-run
 ```
 
-**Для Windows/Docker/SSO:** См. [REQUIREMENTS.md](./REQUIREMENTS.md)
-
 ---
 
 ## 📚 Документация
-
-- **[REQUIREMENTS.md](./REQUIREMENTS.md)** - ⚠️ ВСЯ ТЕХНИЧЕСКАЯ ИНФОРМАЦИЯ (читать первым при потере памяти)
-  - Критические находки для SSO/Cloud Organizations
-  - API specifications с реальными примерами
-  - Установка (Linux/macOS/Windows/Docker)
-  - Troubleshooting (все known issues)
-  - Deployment (systemd/cron/Task Scheduler/Docker)
-  - История критических багов и исправлений
 
 - **[config.yaml.example](./config.yaml.example)** - Пример конфигурации с комментариями
 
