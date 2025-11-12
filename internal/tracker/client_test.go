@@ -16,7 +16,7 @@ func TestParseISO8601Duration(t *testing.T) {
 		{"45 minutes", "PT45M", 45, false},
 		{"30 minutes", "PT30M", 30, false},
 		{"10 minutes", "PT10M", 10, false},
-		{"3 weeks", "P3W", 3 * 7 * 24 * 60, false},
+		{"3 weeks", "P3W", 3 * 5 * 8 * 60, false}, // Business weeks: 3 weeks * 5 days * 8 hours * 60 minutes
 		{"Empty string", "", 0, true},
 		{"Invalid format", "INVALID", 0, true},
 		{"No P prefix", "T8H", 0, true},
