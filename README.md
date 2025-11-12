@@ -320,24 +320,73 @@ Yandex Tracker использует **BUSINESS time units**:
 
 Основные параметры в `config.yaml`:
 
+### 1. Tracker API
+
 ```yaml
 tracker:
+  # Organization ID (обязательно)
+  # Получить: https://tracker.yandex.ru/admin/orgs
   org_id: "${TRACKER_ORG_ID}"  # ⚠️ Tracker org_id (НЕ federation-id!)
-  board_id: 123
-  issues_query: "Boards: 123 AND Assignee: me() AND (Status: \"inProgress\" OR Resolved: today()) AND Type: story, task, bug"
 
+  # API endpoint (по умолчанию)
+  api_endpoint: "https://api.tracker.yandex.net"
+
+  # Board ID для получения задач
+  board_id: 123
+
+  # Запрос для поиска задач
+  # Примеры:
+  #   - Boards: 123 - задачи с доски 123
+  #   - Assignee: me() - назначенные на текущего пользователя
+  #   - Status: "inProgress" - в работе
+  #   - Resolved: today() - завершённые сегодня
+  #   - Type: story, task, bug - исключить родительские (feature, epic)
+  issues_query: "Boards: 123 AND Assignee: me() AND (Status: \"inProgress\" OR Resolved: today()) AND Type: story, task, bug"
+```
+
+### 2. Production Calendar
+
+```yaml
+calendar:
+  # Тип календаря: "isdayoff" (бесплатный) или "production-calendar" (устаревший, платный)
+  type: "isdayoff"
+
+  # Fallback URL для офлайн-данных (xmlcalendar.ru)
+  # {year} будет заменён на текущий год (например, 2025)
+  fallback_url: "https://xmlcalendar.ru/data/ru/{year}/calendar.json"
+
+  # TTL кэша календаря
+  cache_ttl: "24h"
+```
+
+### 3. Time Distribution Rules
+
+```yaml
 time_rules:
+  # Целевые рабочие часы в день (обычно 8)
   target_hours_per_day: 8
 
+  # Ежедневные задачи (фиксированное время каждый рабочий день)
   daily_tasks:
     - issue: "PROJ-101"
       minutes: 30
       description: "Daily standup"
 
+    - issue: "PROJ-102"
+      minutes: 10
+      description: "Team sync"
+
+  # Еженедельные задачи (распределяются на N случайных дней в неделю)
   weekly_tasks:
     - issue: "PROJ-201"
-      hours_per_week: 8
+      hours_per_week: 8          # общее время в неделю
+      days_per_week: 2           # на скольких днях распределить
+      description: "Infrastructure tasks"
+
+    - issue: "PROJ-202"
+      hours_per_week: 2
       days_per_week: 2
+      description: "Administrative tasks"
 
   # Опциональное случайное распределение времени на задачи с доски
   board_tasks:
@@ -347,12 +396,52 @@ time_rules:
     tasks_percent: 20.0                 # процент задач от доски (20%)
     tasks_randomization_percent: 40.0   # рандомизация количества ±40%
 
+  # Рандомизация времени для естественности (±1%)
+  randomization_percent: 1.0
+```
+
+### 4. Daemon Mode
+
+```yaml
+daemon:
+  # Время ежедневной синхронизации (HH:MM формат, MSK timezone UTC+3)
+  # Запускает синхронизацию раз в день в указанное время
+  # По умолчанию: 20:00 (8 PM по Москве)
+  daily_time: "20:00"
+
+  # Windows only: показывать иконку в системном трее
+  # Включает меню по правому клику: "Sync Now", "Status", "Quit"
+  system_tray: true
+
+  # Путь к лог-файлу
+  log_file: "./logs/time-tracker-bot.log"
+
+  # Уровень логирования: debug, info, warn, error
+  log_level: "info"
+```
+
+### 5. IAM Token
+
+```yaml
 iam:
+  # Как часто обновлять IAM токен
+  # Yandex рекомендует обновлять каждый час
+  # (время жизни токена максимум 12 часов)
   refresh_interval: "1h"
+
+  # CLI команда для получения IAM токена
   cli_command: "yc iam create-token"  # или полный путь на Windows
 ```
 
-**Полный пример:** `config.yaml.example`
+### 6. State Storage
+
+```yaml
+state:
+  # Файл для хранения состояния еженедельных задач
+  weekly_schedule_file: "./state/weekly_schedule.json"
+```
+
+**Полный пример со всеми параметрами:** [`config.example.yaml`](./config.example.yaml)
 
 ---
 
@@ -431,7 +520,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## 📚 Документация
 
-- **[config.yaml.example](./config.yaml.example)** - Пример конфигурации с комментариями
+- **[config.example.yaml](./config.example.yaml)** - Пример конфигурации с комментариями
 
 ---
 
