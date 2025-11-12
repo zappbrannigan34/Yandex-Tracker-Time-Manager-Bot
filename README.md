@@ -26,11 +26,24 @@
 
 ## 🚀 Quick Start
 
+### Вариант 1: Скачать готовый бинарник (Recommended)
+
+**Перейти на [Releases](https://github.com/zappbrannigan34/Yandex-Tracker-Time-Manager-Bot/releases/latest) и скачать бинарник для вашей платформы:**
+
+- **Windows:** `time-tracker-bot_<version>_windows_amd64.zip`
+- **Linux:** `time-tracker-bot_<version>_linux_amd64.tar.gz`
+- **macOS (Intel):** `time-tracker-bot_<version>_darwin_amd64.tar.gz`
+- **macOS (Apple Silicon):** `time-tracker-bot_<version>_darwin_arm64.tar.gz`
+
+**Для Windows также доступен daemon бинарник с GUI subsystem:**
+- `time-tracker-bot-daemon.exe` - запускается без консольного окна
+
+### Вариант 2: Собрать из исходников
+
 ### Предварительные требования
 
 - **Go 1.21+** (для сборки)
 - **yc CLI** (Yandex Cloud CLI для получения IAM токенов)
-- **CGO_ENABLED=1** (для Windows system tray, требует GCC/MinGW)
 
 ### Linux/macOS:
 
@@ -43,73 +56,47 @@ yc init
 # Для SSO: yc init --federation-id=YOUR_FEDERATION_ID
 
 # 3. Склонировать репозиторий
-git clone https://github.com/username/time-tracker-bot
-cd time-tracker-bot
+git clone https://github.com/zappbrannigan34/Yandex-Tracker-Time-Manager-Bot
+cd Yandex-Tracker-Time-Manager-Bot
 
 # 4. Собрать
 go build -o time-tracker-bot ./cmd/time-tracker-bot
 
 # 5. Создать config.yaml из примера
-cp config.yaml.example config.yaml
+cp config.example.yaml config.yaml
 
-# 6. Настроить config.yaml
+### Общая настройка (после установки)
+
+```bash
+# 1. Установить yc CLI (если ещё не установлен)
+# Linux/macOS:
+curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+
+# Windows:
+# iex (New-Object System.Net.WebClient).DownloadString('https://storage.yandexcloud.net/yandexcloud-yc/install.ps1')
+
+# 2. Авторизоваться в Yandex Cloud
+yc init
+# Для SSO: yc init --federation-id=YOUR_FEDERATION_ID
+
+# 3. Создать config.yaml из примера
+cp config.example.yaml config.yaml
+
+# 4. Настроить config.yaml
 # ОБЯЗАТЕЛЬНЫЕ параметры:
 # - tracker.org_id: получить из https://tracker.yandex.ru/admin/orgs
 # - tracker.board_id: ID вашей доски в Tracker
 # - time_rules.daily_tasks: ваши ежедневные задачи
 # - time_rules.weekly_tasks: ваши еженедельные задачи
 
-nano config.yaml
-
-# 7. Тестовый запуск (dry-run, ничего не создаёт)
+# 5. Тестовый запуск (dry-run, ничего не создаёт)
 ./time-tracker-bot sync --dry-run
 
-# 8. Реальное списание времени
+# 6. Реальное списание времени
 ./time-tracker-bot sync
 
-# 9. Запустить daemon (автоматическое списание в 20:00 MSK ежедневно)
+# 7. Запустить daemon (автоматическое списание в 20:00 MSK ежедневно)
 ./time-tracker-bot daemon
-```
-
-### Windows:
-
-```powershell
-# 1. Установить yc CLI
-iex (New-Object System.Net.WebClient).DownloadString('https://storage.yandexcloud.net/yandexcloud-yc/install.ps1')
-
-# 2. Авторизоваться в Yandex Cloud
-yc init
-# Для SSO: yc init --federation-id=YOUR_FEDERATION_ID
-
-# 3. Установить MinGW-w64 (для CGO, требуется для system tray)
-# Скачать: https://github.com/niXman/mingw-builds-binaries/releases
-# Или через chocolatey: choco install mingw
-
-# 4. Собрать (с CGO для system tray)
-$env:CGO_ENABLED = "1"
-go build -ldflags "-H windowsgui" -o time-tracker-bot.exe ./cmd/time-tracker-bot
-
-# 5. Создать config.yaml из примера
-Copy-Item config.yaml.example config.yaml
-
-# 6. Настроить config.yaml
-# ОБЯЗАТЕЛЬНЫЕ параметры:
-# - tracker.org_id: получить из https://tracker.yandex.ru/admin/orgs
-# - tracker.board_id: ID вашей доски
-# - iam.cli_command: полный путь к yc.exe (например: "C:/Users/USERNAME/yandex-cloud/bin/yc.exe iam create-token")
-# - time_rules.daily_tasks: ваши задачи
-# - time_rules.weekly_tasks: ваши задачи
-
-notepad config.yaml
-
-# 7. Тестовый запуск
-.\time-tracker-bot.exe sync --dry-run
-
-# 8. Списать время
-.\time-tracker-bot.exe sync
-
-# 9. Запустить daemon (в фоне, иконка в трее)
-.\time-tracker-bot.exe daemon
 ```
 
 ---

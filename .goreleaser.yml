@@ -69,7 +69,7 @@ changelog:
 
 release:
   github:
-    owner: username
-    name: time-tracker-bot
+    owner: zappbrannigan34
+    name: Yandex-Tracker-Time-Manager-Bot
   draft: false
   prerelease: auto
