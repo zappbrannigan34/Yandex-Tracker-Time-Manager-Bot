@@ -38,7 +38,10 @@ builds:
       - -s -w -X main.version={{.Version}} -H windowsgui
 
 archives:
+  # Main archives (CLI binary only)
   - id: default
+    builds:
+      - cli
     format: tar.gz
     name_template: >-
       {{ .ProjectName }}_
@@ -48,6 +51,21 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+    files:
+      - README.md
+      - LICENSE
+      - config.example.yaml
+
+  # Separate archive for Windows daemon binary
+  - id: daemon
+    builds:
+      - daemon-windows
+    format: zip
+    name_template: >-
+      {{ .ProjectName }}-daemon_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
     files:
       - README.md
       - LICENSE
