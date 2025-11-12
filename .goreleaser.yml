@@ -1,4 +1,5 @@
-version: 2
+# version: 2 not supported by goreleaser 1.26.2
+# Using implicit version 1
 
 before:
   hooks:
