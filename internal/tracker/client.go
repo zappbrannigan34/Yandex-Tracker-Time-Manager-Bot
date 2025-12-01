@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,8 +15,14 @@ import (
 )
 
 const (
-	defaultTimeout = 30 * time.Second
-	defaultRetries = 3
+	defaultTimeout    = 30 * time.Second
+	defaultRetries    = 3
+	worklogSearchPath = "/v2/worklog/_search"
+	// По офдоку «Постраничное отображение результатов» (https://yandex.ru/support/tracker/ru/common-format#displaying-results)
+	// API принимает параметры page/perPage. Максимум не документирован, но 100 стабильно отдаётся Трекером, используем это значение.
+	// Tracker API возвращает максимум 50 записей на страницу, даже если запросить больше
+	// (см. https://yandex.ru/support/tracker/ru/common-format#displaying-results).
+	worklogPageSize = 50
 )
 
 // Client represents Yandex Tracker API client
@@ -123,23 +131,24 @@ func (c *Client) GetWorklogsForToday(date time.Time) ([]Worklog, error) {
 	createdTo := endOfMonth.AddDate(0, 0, 7) // +7 days after month end
 
 	req := SearchWorklogsRequest{
-		CreatedBy: currentUser.ID.String(), // Filter by user ID (extracted from Self URL)
+		// createdAt only: API для SSO возвращает worklogs всех пользователей,
+		// поэтому фильтруем текущего пользователя только на клиенте.
 		CreatedAt: &TimeRange{
 			From: createdFrom.Format("2006-01-02T15:04:05.000-0700"),
 			To:   createdTo.Format("2006-01-02T15:04:05.000-0700"),
 		},
 	}
 
+	startFetch := time.Now()
 	c.logger.Info("Searching worklogs",
 		zap.Time("created_from", createdFrom),
 		zap.Time("created_to", createdTo),
 		zap.Time("target_date", date))
-
-	var allWorklogs []Worklog
-	err = c.doRequest("POST", "/v2/worklog/_search", req, &allWorklogs)
+	allWorklogs, err := c.fetchAllWorklogs(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worklogs: %w", err)
 	}
+	lookupDuration := time.Since(startFetch)
 
 	// Filter client-side by start date (when work was actually performed) AND current user
 	var worklogs []Worklog
@@ -149,13 +158,7 @@ func (c *Client) GetWorklogsForToday(date time.Time) ([]Worklog, error) {
 		startLocal := wl.Start.In(time.Local)
 
 		// Check if worklog belongs to current user
-		// If ID is empty, fallback to Display name comparison
-		var isCurrentUser bool
-		if currentUser.ID != "" {
-			isCurrentUser = wl.CreatedBy.ID == currentUser.ID
-		} else {
-			isCurrentUser = wl.CreatedBy.Display == currentUser.Display
-		}
+		isCurrentUser := worklogMatchesUser(wl, currentUser)
 
 		// Check if worklog's start time falls within target day
 		if startLocal.Year() == date.Year() &&
@@ -178,11 +181,16 @@ func (c *Client) GetWorklogsForToday(date time.Time) ([]Worklog, error) {
 		}
 	}
 
+	if len(worklogs) == 0 {
+		c.logWorklogDiagnostics("today", date, currentUser, allWorklogs)
+	}
+
 	c.logger.Info("Worklogs retrieved and filtered",
 		zap.Time("date", date),
 		zap.Int("total_fetched", len(allWorklogs)),
 		zap.Int("filtered_count", len(worklogs)),
-		zap.String("target_day", date.Format("2006-01-02")))
+		zap.String("target_day", date.Format("2006-01-02")),
+		zap.Duration("lookup_time", lookupDuration))
 
 	return worklogs, nil
 }
@@ -203,24 +211,24 @@ func (c *Client) GetWorklogsForRange(from, to time.Time) ([]Worklog, error) {
 	createdTo := endOfMonth.AddDate(0, 0, 7) // +7 days buffer
 
 	req := SearchWorklogsRequest{
-		CreatedBy: currentUser.ID.String(),
 		CreatedAt: &TimeRange{
 			From: createdFrom.Format("2006-01-02T15:04:05.000-0700"),
 			To:   createdTo.Format("2006-01-02T15:04:05.000-0700"),
 		},
 	}
 
+	rangeFetchStart := time.Now()
 	c.logger.Info("Searching worklogs for range",
 		zap.Time("from", from),
 		zap.Time("to", to),
 		zap.Time("created_from", createdFrom),
 		zap.Time("created_to", createdTo))
 
-	var allWorklogs []Worklog
-	err = c.doRequest("POST", "/v2/worklog/_search", req, &allWorklogs)
+	allWorklogs, err := c.fetchAllWorklogs(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worklogs: %w", err)
 	}
+	rangeLookupDuration := time.Since(rangeFetchStart)
 
 	// Filter client-side by start date range AND current user
 	var worklogs []Worklog
@@ -229,12 +237,7 @@ func (c *Client) GetWorklogsForRange(from, to time.Time) ([]Worklog, error) {
 		startLocal := wl.Start.In(time.Local)
 
 		// Check if worklog belongs to current user
-		var isCurrentUser bool
-		if currentUser.ID != "" {
-			isCurrentUser = wl.CreatedBy.ID == currentUser.ID
-		} else {
-			isCurrentUser = wl.CreatedBy.Display == currentUser.Display
-		}
+		isCurrentUser := worklogMatchesUser(wl, currentUser)
 
 		// Check if worklog's start time falls within range
 		if (startLocal.After(from) || startLocal.Equal(from)) &&
@@ -244,13 +247,46 @@ func (c *Client) GetWorklogsForRange(from, to time.Time) ([]Worklog, error) {
 		}
 	}
 
+	if len(worklogs) == 0 {
+		c.logWorklogDiagnostics("range", to, currentUser, allWorklogs)
+	}
+
 	c.logger.Info("Worklogs retrieved and filtered for range",
 		zap.Time("from", from),
 		zap.Time("to", to),
 		zap.Int("total_fetched", len(allWorklogs)),
-		zap.Int("filtered_count", len(worklogs)))
+		zap.Int("filtered_count", len(worklogs)),
+		zap.Duration("lookup_time", rangeLookupDuration))
 
 	return worklogs, nil
+}
+
+// fetchAllWorklogs retrieves all worklogs for given request using pagination.
+func (c *Client) fetchAllWorklogs(req SearchWorklogsRequest) ([]Worklog, error) {
+	page := 1
+	var allWorklogs []Worklog
+
+	for {
+		params := url.Values{}
+		params.Set("page", strconv.Itoa(page))
+		params.Set("perPage", strconv.Itoa(worklogPageSize))
+		pathWithQuery := fmt.Sprintf("%s?%s", worklogSearchPath, params.Encode())
+
+		var batch []Worklog
+		if err := c.doRequest("POST", pathWithQuery, req, &batch); err != nil {
+			return nil, err
+		}
+
+		allWorklogs = append(allWorklogs, batch...)
+
+		if len(batch) < worklogPageSize {
+			break
+		}
+
+		page++
+	}
+
+	return allWorklogs, nil
 }
 
 // CreateWorklog creates a new worklog entry
@@ -334,19 +370,24 @@ func (c *Client) DeleteWorklog(issueKey string, worklogID string) error {
 
 // doRequest performs HTTP request with authentication
 func (c *Client) doRequest(method, path string, body interface{}, result interface{}) error {
-	var bodyReader io.Reader
+	var bodyBytes []byte
 	if body != nil {
 		jsonData, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("failed to marshal request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(jsonData)
+		bodyBytes = jsonData
 	}
 
 	url := c.baseURL + path
 
 	var lastErr error
 	for attempt := 1; attempt <= defaultRetries; attempt++ {
+		var bodyReader io.Reader
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+
 		err := c.doRequestOnce(method, url, bodyReader, result)
 		if err == nil {
 			return nil
@@ -416,6 +457,57 @@ func (c *Client) doRequestOnce(method, url string, body io.Reader, result interf
 	return nil
 }
 
+func worklogMatchesUser(wl Worklog, user *User) bool {
+	if user == nil {
+		return false
+	}
+
+	if user.ID != "" && wl.CreatedBy.ID == user.ID {
+		return true
+	}
+
+	if wl.CreatedBy.Display != "" && wl.CreatedBy.Display == user.Display {
+		return true
+	}
+
+	return false
+}
+
+func (c *Client) logWorklogDiagnostics(context string, refTime time.Time, currentUser *User, worklogs []Worklog) {
+	matchCount := 0
+	for _, wl := range worklogs {
+		if worklogMatchesUser(wl, currentUser) {
+			matchCount++
+		}
+	}
+
+	c.logger.Warn("Worklog diagnostics",
+		zap.String("context", context),
+		zap.Time("reference_time", refTime),
+		zap.Int("total_worklogs", len(worklogs)),
+		zap.Int("matched_current_user", matchCount),
+		zap.String("current_user_id", currentUser.ID.String()),
+		zap.String("current_user_display", currentUser.Display))
+
+	sampleCount := 3
+	if len(worklogs) < sampleCount {
+		sampleCount = len(worklogs)
+	}
+
+	for i := 0; i < sampleCount; i++ {
+		wl := worklogs[i]
+		c.logger.Warn("Worklog sample",
+			zap.String("context", context),
+			zap.Int("index", i),
+			zap.String("issue", wl.Issue.Key),
+			zap.String("created_by_id", wl.CreatedBy.ID.String()),
+			zap.String("created_by_display", wl.CreatedBy.Display),
+			zap.Time("start", wl.Start.Time),
+			zap.Time("created_at", wl.CreatedAt.Time),
+			zap.String("duration", wl.Duration))
+	}
+}
+
 // ParseISO8601Duration parses ISO 8601 duration to minutes
 // Yandex Tracker uses BUSINESS time units: 1 day = 8 hours, 1 week = 5 days (40 hours)
 // Supported formats:
@@ -460,7 +552,7 @@ func ParseISO8601Duration(duration string) (float64, error) {
 			var weeks int
 			fmt.Sscanf(datePart[:idx], "%d", &weeks)
 			minutes += float64(weeks * 5 * 8 * 60) // 5 business days * 8 hours * 60 minutes
-			datePart = datePart[idx+1:] // Continue parsing after W
+			datePart = datePart[idx+1:]            // Continue parsing after W
 		}
 
 		// Parse days (PnD)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/username/time-tracker-bot/internal/tracker"
+	"go.uber.org/zap"
 )
 
 // StatusTimeline represents status changes over time for an issue
@@ -183,7 +184,7 @@ func (m *Manager) findMissingWorkdays(from, to time.Time) ([]time.Time, error) {
 
 		// Check if it's today (skip current day)
 		today := time.Now().Truncate(24 * time.Hour)
-		if d.Truncate(24*time.Hour).Equal(today) {
+		if d.Truncate(24 * time.Hour).Equal(today) {
 			continue
 		}
 
@@ -202,4 +203,101 @@ func (m *Manager) findMissingWorkdays(from, to time.Time) ([]time.Time, error) {
 	}
 
 	return missingDays, nil
+}
+
+// NormalizeWorkdaysRange ensures historic working days do not exceed target minutes
+func (m *Manager) NormalizeWorkdaysRange(from, to time.Time, dryRun bool) (*NormalizationSummary, error) {
+	start := time.Now()
+	summary := &NormalizationSummary{}
+
+	if to.Before(from) {
+		summary.Duration = time.Since(start)
+		return summary, nil
+	}
+
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		isWorkday, targetHours, err := m.calendar.IsWorkday(d)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check if %s is workday: %w", d.Format("2006-01-02"), err)
+		}
+		if !isWorkday || targetHours == 0 {
+			continue
+		}
+
+		summary.ProcessedDays++
+
+		targetMinutes := float64(targetHours * 60)
+		workedMinutes, err := m.trackerClient.GetWorkedMinutesToday(d)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get worked time for %s: %w", d.Format("2006-01-02"), err)
+		}
+
+		diff := workedMinutes - targetMinutes
+		if diff > cleanupEpsilonMinutes {
+			summary.NormalizedDays++
+			summary.TotalMinutesTrimmed += diff
+
+			m.logger.Info("Historic overage detected",
+				zap.Time("date", d),
+				zap.Float64("worked_minutes", workedMinutes),
+				zap.Float64("target_minutes", targetMinutes),
+				zap.Bool("dry_run", dryRun))
+
+			if dryRun {
+				continue
+			}
+
+			if err := m.cleanupAndNormalize(d); err != nil {
+				return nil, fmt.Errorf("failed to cleanup %s: %w", d.Format("2006-01-02"), err)
+			}
+		}
+	}
+
+	summary.Duration = time.Since(start)
+	return summary, nil
+}
+
+// buildStatusTimelines загружает историю статусов для всех релевантных задач.
+func (m *Manager) buildStatusTimelines(from, to time.Time) (map[string]*StatusTimeline, error) {
+	issueKeys, err := m.collectAllRelevantIssues(from, to)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect relevant issues: %w", err)
+	}
+
+	timelines := make(map[string]*StatusTimeline, len(issueKeys))
+
+	for _, issueKey := range issueKeys {
+		changelog, err := m.trackerClient.GetChangelog(issueKey)
+		if err != nil {
+			m.logger.Warn(fmt.Sprintf("failed to load changelog for %s: %v", issueKey, err))
+			continue
+		}
+		timelines[issueKey] = buildStatusTimeline(issueKey, changelog)
+	}
+
+	return timelines, nil
+}
+
+// issuesInProgressOnDate возвращает список задач, которые были в работе в указанную дату.
+func issuesInProgressOnDate(date time.Time, timelines map[string]*StatusTimeline) []string {
+	if len(timelines) == 0 {
+		return nil
+	}
+
+	var result []string
+
+	for issueKey, timeline := range timelines {
+		if timeline == nil {
+			continue
+		}
+
+		status := timeline.StatusOnDate(date)
+		if status == "inProgress" || status == "open" || status == "" {
+			result = append(result, issueKey)
+		}
+	}
+
+	sort.Strings(result)
+
+	return result
 }

@@ -62,8 +62,8 @@ func (t *TrackerTime) UnmarshalJSON(b []byte) error {
 		"2006-01-02T15:04:05.000-0700", // Main format: 2024-05-22T17:06:54.875+0000
 		"2006-01-02T15:04:05.000Z0700", // Alternative without colon
 		"2006-01-02T15:04:05-0700",     // Without milliseconds
-		time.RFC3339,                    // Standard RFC3339
-		time.RFC3339Nano,                // RFC3339 with nanoseconds
+		time.RFC3339,                   // Standard RFC3339
+		time.RFC3339Nano,               // RFC3339 with nanoseconds
 	}
 
 	var parseErr error
@@ -143,17 +143,17 @@ type IssueRef struct {
 
 // SearchIssuesRequest represents request to search issues
 type SearchIssuesRequest struct {
-	Query  string `json:"query,omitempty"`
-	Filter map[string]interface{} `json:"filter,omitempty"`
-	Order  string `json:"order,omitempty"`
-	Expand string `json:"expand,omitempty"`
-	PerPage int   `json:"perPage,omitempty"`
+	Query   string                 `json:"query,omitempty"`
+	Filter  map[string]interface{} `json:"filter,omitempty"`
+	Order   string                 `json:"order,omitempty"`
+	Expand  string                 `json:"expand,omitempty"`
+	PerPage int                    `json:"perPage,omitempty"`
 }
 
 // SearchWorklogsRequest represents request to search worklogs
 type SearchWorklogsRequest struct {
-	CreatedBy string         `json:"createdBy,omitempty"`
-	CreatedAt *TimeRange     `json:"createdAt,omitempty"`
+	CreatedBy string     `json:"createdBy,omitempty"`
+	CreatedAt *TimeRange `json:"createdAt,omitempty"`
 }
 
 // TimeRange represents a time range
@@ -184,13 +184,13 @@ type TimeEntry struct {
 
 // ChangelogEntry represents a single change in issue history
 type ChangelogEntry struct {
-	ID        FlexibleID   `json:"id"`
-	Self      string       `json:"self"`
-	Issue     IssueRef     `json:"issue"`
-	UpdatedAt TrackerTime  `json:"updatedAt"`
-	UpdatedBy User         `json:"updatedBy"`
-	Type      string       `json:"type"` // "IssueCreated", "IssueUpdated", etc.
-	Transport string       `json:"transport,omitempty"`
+	ID        FlexibleID    `json:"id"`
+	Self      string        `json:"self"`
+	Issue     IssueRef      `json:"issue"`
+	UpdatedAt TrackerTime   `json:"updatedAt"`
+	UpdatedBy User          `json:"updatedBy"`
+	Type      string        `json:"type"` // "IssueCreated", "IssueUpdated", etc.
+	Transport string        `json:"transport,omitempty"`
 	Fields    []FieldChange `json:"fields"`
 }
 
@@ -203,7 +203,7 @@ type FieldChange struct {
 
 // FieldInfo represents metadata about a field
 type FieldInfo struct {
-	Self    string     `json:"self"`
-	ID      string     `json:"id"` // "status", "assignee", etc.
-	Display string     `json:"display"`
+	Self    string `json:"self"`
+	ID      string `json:"id"` // "status", "assignee", etc.
+	Display string `json:"display"`
 }

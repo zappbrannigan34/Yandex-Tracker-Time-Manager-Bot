@@ -3,6 +3,8 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,23 +18,27 @@ type TokenManager struct {
 	mu              sync.RWMutex
 	token           string
 	lastRefresh     time.Time
-	expiresAt       time.Time // Token expiration time
+	expiresAt       time.Time     // Token expiration time
 	tokenLifetime   time.Duration // Token lifetime (12 hours for IAM tokens)
 	refreshInterval time.Duration
 	cliCommand      string
+	initCommand     string
+	federationID    string
 	logger          *zap.Logger
 	ctx             context.Context
 	cancel          context.CancelFunc
 }
 
 // NewTokenManager creates a new token manager
-func NewTokenManager(refreshInterval time.Duration, cliCommand string, logger *zap.Logger) *TokenManager {
+func NewTokenManager(refreshInterval time.Duration, cliCommand string, initCommand string, federationID string, logger *zap.Logger) *TokenManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	tm := &TokenManager{
 		tokenLifetime:   12 * time.Hour, // IAM tokens live up to 12 hours
 		refreshInterval: refreshInterval,
 		cliCommand:      cliCommand,
+		initCommand:     initCommand,
+		federationID:    federationID,
 		logger:          logger,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -157,9 +163,17 @@ func (tm *TokenManager) refreshLoop() {
 }
 
 // checkYCAuth checks if yc CLI is authenticated
+func (tm *TokenManager) ycExecutable() string {
+	parts := strings.Fields(tm.cliCommand)
+	if len(parts) == 0 {
+		return "yc"
+	}
+	return parts[0]
+}
+
 func (tm *TokenManager) checkYCAuth() error {
 	// Try to get current config (non-interactive check)
-	cmd := exec.Command("yc", "config", "list")
+	cmd := exec.Command(tm.ycExecutable(), "config", "list")
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("yc CLI not configured or not authenticated")
@@ -174,14 +188,81 @@ func (tm *TokenManager) checkYCAuth() error {
 	return nil
 }
 
-// getIAMToken executes yc CLI command to get IAM token
-func (tm *TokenManager) getIAMToken() (string, error) {
-	// Check yc auth status first (non-interactive)
-	if err := tm.checkYCAuth(); err != nil {
-		return "", fmt.Errorf("authentication check failed: %w (hint: run 'yc init' to re-authenticate)", err)
+// ensureYCAuth verifies authentication and attempts automatic yc init if needed
+func (tm *TokenManager) ensureYCAuth() error {
+	if err := tm.checkYCAuth(); err == nil {
+		return nil
 	}
 
-	// Parse command (e.g., "yc iam create-token")
+	tm.logger.Warn("yc CLI not authenticated, running 'yc init' automatically")
+
+	if err := tm.runYCInit(); err != nil {
+		return fmt.Errorf("authentication check failed and automatic 'yc init' failed: %w", err)
+	}
+
+	// Re-check after init
+	if err := tm.checkYCAuth(); err != nil {
+		return fmt.Errorf("authentication check still failing after 'yc init': %w", err)
+	}
+
+	return nil
+}
+
+// runYCInit launches interactive yc init so user can complete auth
+func (tm *TokenManager) runYCInit() error {
+	var cmd *exec.Cmd
+	if tm.initCommand != "" {
+		initParts := strings.Fields(tm.initCommand)
+		if len(initParts) == 0 {
+			return fmt.Errorf("init command is empty")
+		}
+		cmd = exec.Command(initParts[0], initParts[1:]...)
+	} else {
+		args := []string{"init"}
+		if tm.federationID != "" {
+			args = append(args, "--federation-id", tm.federationID)
+		}
+		cmd = exec.Command(tm.ycExecutable(), args...)
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Automatically answer "1" (re-initialize default profile), then pass through user input
+	autoAnswer := strings.NewReader("1\n")
+	cmd.Stdin = io.MultiReader(autoAnswer, os.Stdin)
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("yc init command failed: %w", err)
+	}
+
+	return nil
+}
+
+// getIAMToken executes yc CLI command to get IAM token
+func (tm *TokenManager) getIAMToken() (string, error) {
+	token, err := tm.tryGetIAMToken()
+	if err == nil {
+		return token, nil
+	}
+
+	if tm.isAuthError(err) {
+		tm.logger.Warn("yc CLI authentication failed, attempting automatic init", zap.Error(err))
+		if initErr := tm.ensureYCAuth(); initErr != nil {
+			return "", fmt.Errorf("authentication check failed and automatic 'yc init' failed: %w", initErr)
+		}
+		return tm.tryGetIAMToken()
+	}
+
+	return "", err
+	}
+
+// GetLastRefreshTime returns the last time token was refreshed
+func (tm *TokenManager) GetLastRefreshTime() time.Time {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.lastRefresh
+}
+
+func (tm *TokenManager) tryGetIAMToken() (string, error) {
 	parts := strings.Fields(tm.cliCommand)
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty CLI command")
@@ -193,10 +274,10 @@ func (tm *TokenManager) getIAMToken() (string, error) {
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			stderrMsg := string(exitErr.Stderr)
-			// Check if it's an auth error
 			if strings.Contains(stderrMsg, "not authenticated") ||
-			   strings.Contains(stderrMsg, "authentication") {
-				return "", fmt.Errorf("yc CLI authentication expired: %s (hint: run 'yc init')", stderrMsg)
+				strings.Contains(stderrMsg, "authentication") ||
+				strings.Contains(stderrMsg, "OAuth token") {
+				return "", fmt.Errorf("yc CLI authentication expired: %s", stderrMsg)
 			}
 			return "", fmt.Errorf("yc CLI failed: %s: %s", err, stderrMsg)
 		}
@@ -211,9 +292,12 @@ func (tm *TokenManager) getIAMToken() (string, error) {
 	return token, nil
 }
 
-// GetLastRefreshTime returns the last time token was refreshed
-func (tm *TokenManager) GetLastRefreshTime() time.Time {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return tm.lastRefresh
+func (tm *TokenManager) isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "authentication") ||
+		strings.Contains(msg, "OAuth token") ||
+		strings.Contains(msg, "not authenticated")
 }

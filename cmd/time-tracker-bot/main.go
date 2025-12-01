@@ -2,13 +2,15 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"math"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/username/time-tracker-bot/internal/calendar"
 	"github.com/username/time-tracker-bot/internal/config"
-	"github.com/username/time-tracker-bot/internal/daemon"
 	"github.com/username/time-tracker-bot/internal/timemanager"
 	"github.com/username/time-tracker-bot/internal/tracker"
 	"github.com/username/time-tracker-bot/pkg/dateutil"
@@ -18,9 +20,9 @@ import (
 )
 
 var (
-	version    = "1.0.0"
 	configPath string
 	logger     *zap.Logger
+	syncWriter io.Writer = os.Stdout
 )
 
 func main() {
@@ -45,13 +47,6 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "config.yaml", "Config file path")
 
 	rootCmd.AddCommand(syncCmd())
-	rootCmd.AddCommand(statusCmd())
-	rootCmd.AddCommand(reportCmd())
-	rootCmd.AddCommand(backfillCmd())
-	rootCmd.AddCommand(cleanupCmd())
-	rootCmd.AddCommand(weeklyScheduleCmd())
-	rootCmd.AddCommand(daemonCmd())
-	rootCmd.AddCommand(versionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -60,27 +55,32 @@ func main() {
 }
 
 func syncCmd() *cobra.Command {
-	var dateStr string
 	var dryRun bool
+	var teeOutput string
 
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Sync time for a date",
+		Short: "Backfill месяц и полностью заполнить сегодняшний день",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Parse date
-			var date time.Time
-			var err error
-
-			if dateStr == "today" {
-				date = dateutil.Today()
-			} else if dateStr == "yesterday" {
-				date = dateutil.Yesterday()
-			} else {
-				date, err = dateutil.ParseDate(dateStr)
-				if err != nil {
-					return fmt.Errorf("invalid date format: %w", err)
+			syncWriter = os.Stdout
+			if teeOutput != "" {
+				if err := os.MkdirAll(filepath.Dir(teeOutput), 0o755); err != nil {
+					return fmt.Errorf("failed to create tee path: %w", err)
 				}
+				f, err := os.OpenFile(teeOutput, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+				if err != nil {
+					return fmt.Errorf("failed to open tee-output file: %w", err)
+				}
+				defer f.Close()
+				syncWriter = io.MultiWriter(os.Stdout, f)
+				syncPrintf("📝 Output is mirrored to %s\n", teeOutput)
 			}
+			defer func() {
+				syncWriter = os.Stdout
+			}()
+
+			today := dateutil.Today()
+			monthStart := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.Local)
 
 			// Load config
 			cfg, err := config.Load(configPath)
@@ -95,394 +95,118 @@ func syncCmd() *cobra.Command {
 				return err
 			}
 
-			logger.Info("Starting sync",
-				zap.Time("date", date),
+			logger.Info("Starting full sync",
+				zap.Time("month_start", monthStart),
+				zap.Time("today", today),
 				zap.Bool("dry_run", dryRun))
 
-			// Distribute time
-			entries, err := manager.DistributeTimeForDate(date, dryRun)
+			syncPrintf("⏳ Step 1/3: normalizing %s .. %s\n",
+				monthStart.Format("2006-01-02"),
+				today.AddDate(0, 0, -1).Format("2006-01-02"))
+			// Step 1: normalize historic days (до сегодняшнего)
+			normalizeSummary, err := manager.NormalizeWorkdaysRange(monthStart, today.AddDate(0, 0, -1), dryRun)
 			if err != nil {
-				return fmt.Errorf("failed to distribute time: %w", err)
+				return fmt.Errorf("normalization failed: %w", err)
+			}
+			if normalizeSummary != nil {
+				syncPrintf("   • Processed %d days, normalized %d (%.1fh removed) in %s\n",
+					normalizeSummary.ProcessedDays,
+					normalizeSummary.NormalizedDays,
+					normalizeSummary.TotalMinutesTrimmed/60,
+					normalizeSummary.Duration.Round(time.Millisecond))
 			}
 
-			// Print results
-			if len(entries) == 0 {
-				fmt.Println("No time entries to log (either non-workday or already worked enough)")
-				return nil
+			syncPrintf("⏳ Step 2/3: backfill month-to-date\n")
+			// Step 2: Backfill entire month-to-date (excluding future days)
+			backfillResult, timelines, err := manager.BackfillPeriod(monthStart, today, dryRun, nil)
+			if err != nil {
+				return fmt.Errorf("backfill failed: %w", err)
 			}
+			syncPrintf("   • Backfill processed %d day(s), %.1fh planned, took %s\n",
+				backfillResult.ProcessedDays,
+				backfillResult.TotalMinutes/60,
+				backfillResult.Duration.Round(time.Millisecond))
 
-			fmt.Printf("\n%s Time Entries for %s:\n", getIcon(dryRun), date.Format("2006-01-02"))
-			fmt.Println("═══════════════════════════════════════════════════════")
-
-			totalMinutes := 0.0
-			for _, entry := range entries {
-				hours := int(entry.Minutes / 60)
-				mins := int(entry.Minutes) % 60
-				fmt.Printf("  • %-15s  %2dh %2dm  %s\n",
-					entry.IssueKey,
-					hours, mins,
-					entry.Comment)
-				totalMinutes += entry.Minutes
-			}
-
-			fmt.Println("═══════════════════════════════════════════════════════")
-			totalHours := int(totalMinutes / 60)
-			totalMins := int(totalMinutes) % 60
-			fmt.Printf("  Total: %dh %dm (%d entries)\n", totalHours, totalMins, len(entries))
-
-			if dryRun {
-				fmt.Println("\n[DRY RUN] No worklogs were created")
+			monthlyStatus, err := manager.GetMonthlyStatus(monthStart, today)
+			if err != nil {
+				logger.Warn("Failed to calculate month-to-date status", zap.Error(err))
 			} else {
-				fmt.Println("\n✅ Time logged successfully")
-			}
-
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVarP(&dateStr, "date", "d", "today", "Date to sync (today, yesterday, or YYYY-MM-DD)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without creating worklogs")
-
-	return cmd
-}
-
-func statusCmd() *cobra.Command {
-	var dateStr string
-
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show current time tracking status",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Parse date
-			var date time.Time
-			var err error
-
-			if dateStr == "today" {
-				date = dateutil.Today()
-			} else {
-				date, err = dateutil.ParseDate(dateStr)
-				if err != nil {
-					return fmt.Errorf("invalid date format: %w", err)
+				syncPrintf("\n📊 Month-to-date (%s to %s)\n",
+					monthStart.Format("2006-01-02"),
+					today.Format("2006-01-02"))
+				syncPrintln("═══════════════════════════════════════════════════════")
+				syncPrintf("  Working days:   %d  - рабочие дни по графику\n", monthlyStatus.WorkingDays)
+				syncPrintf("  Target hours:   %.1fh (%.0f minutes)  - норматив по календарю\n", monthlyStatus.TargetMinutes/60, monthlyStatus.TargetMinutes)
+				syncPrintf("  Logged hours:   %.1fh (%.0f minutes)  - уже списано в Tracker\n", monthlyStatus.WorkedMinutes/60, monthlyStatus.WorkedMinutes)
+				cleanupDays := 0
+				cleanupHours := 0.0
+				if normalizeSummary != nil {
+					cleanupDays = normalizeSummary.NormalizedDays
+					cleanupHours = normalizeSummary.TotalMinutesTrimmed / 60
 				}
-			}
-
-			// Load config
-			cfg, err := config.Load(configPath)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-			cfg.ExpandEnvVars()
-
-			// Initialize components
-			manager, err := initializeManager(cfg)
-			if err != nil {
-				return err
-			}
-
-			// Get status
-			workedMinutes, targetMinutes, err := manager.GetStatus(date)
-			if err != nil {
-				return fmt.Errorf("failed to get status: %w", err)
-			}
-
-			// Print status
-			fmt.Printf("\nTime Tracking Status for %s:\n", date.Format("2006-01-02"))
-			fmt.Println("═══════════════════════════════════════════════════════")
-
-			if targetMinutes == 0 {
-				fmt.Println("  Not a working day")
-				return nil
-			}
-
-			workedHours := workedMinutes / 60
-			targetHours := targetMinutes / 60
-			remainingMinutes := targetMinutes - workedMinutes
-			remainingHours := remainingMinutes / 60
-
-			fmt.Printf("  Worked:    %.1fh (%.0f minutes)\n", workedHours, workedMinutes)
-			fmt.Printf("  Target:    %.1fh (%.0f minutes)\n", targetHours, targetMinutes)
-
-			if remainingMinutes > 0 {
-				fmt.Printf("  Remaining: %.1fh (%.0f minutes)\n", remainingHours, remainingMinutes)
-			} else {
-				fmt.Printf("  ✅ Target reached!\n")
-			}
-
-			progress := (workedMinutes / targetMinutes) * 100
-			fmt.Printf("  Progress:  %.1f%%\n", progress)
-
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVarP(&dateStr, "date", "d", "today", "Date to check (today or YYYY-MM-DD)")
-
-	return cmd
-}
-
-func reportCmd() *cobra.Command {
-	var dateStr string
-	var week bool
-	var month bool
-	var fromStr string
-	var toStr string
-
-	cmd := &cobra.Command{
-		Use:   "report",
-		Short: "Show detailed worklog report",
-		Long:  "Show detailed worklog report with list of tasks and time spent",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Parse date range
-			var from, to time.Time
-			var err error
-
-			// Determine date range based on flags
-			if week {
-				// Current week (Monday to Sunday)
-				now := dateutil.Today()
-				weekday := int(now.Weekday())
-				if weekday == 0 {
-					weekday = 7 // Sunday = 7
+				syncPrintf("  Cleanup days:   %d (%.1fh removed)  - переработка снята автоматически\n", cleanupDays, cleanupHours)
+				syncPrintf("  Backfill days:  %d (%.1fh planned)  - найдено незакрытых рабочих дней\n", backfillResult.ProcessedDays, backfillResult.TotalMinutes/60)
+				remaining := monthlyStatus.RemainingMinutes()
+				label := "Remaining"
+				statusExplanation := "ещё нужно списать, чтобы совпасть с нормативом"
+				if remaining < 0 {
+					label = "Overage"
+					statusExplanation = "переработка относительно норматива"
 				}
-				from = now.AddDate(0, 0, -(weekday - 1)) // Monday
-				to = from.AddDate(0, 0, 6)               // Sunday
-			} else if month {
-				// Current month
-				now := dateutil.Today()
-				from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
-				to = time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.Local)
-			} else if fromStr != "" && toStr != "" {
-				// Custom range
-				from, err = dateutil.ParseDate(fromStr)
-				if err != nil {
-					return fmt.Errorf("invalid from date: %w", err)
-				}
-				to, err = dateutil.ParseDate(toStr)
-				if err != nil {
-					return fmt.Errorf("invalid to date: %w", err)
-				}
-			} else if dateStr != "" {
-				// Single day (detailed)
-				if dateStr == "today" {
-					from = dateutil.Today()
-				} else if dateStr == "yesterday" {
-					from = dateutil.Yesterday()
-				} else {
-					from, err = dateutil.ParseDate(dateStr)
-					if err != nil {
-						return fmt.Errorf("invalid date format: %w", err)
+				syncPrintf("  %s:        %.1fh (%.0f minutes)  - %s\n", label, math.Abs(remaining)/60, math.Abs(remaining), statusExplanation)
+
+				if len(monthlyStatus.Daily) > 0 {
+					syncPrintln("\n📅 Per-day breakdown:")
+					syncPrintln("═══════════════════════════════════════════════════════")
+					syncPrintln("  Date         | Target  | Logged  | Diff | Status")
+					syncPrintln("---------------+---------+---------+---------+----------------")
+					for _, day := range monthlyStatus.Daily {
+						diff := day.WorkedMinutes - day.TargetMinutes
+						statusText := dayStatusLabel(diff)
+						syncPrintf("  %s | %5.1fh | %5.1fh | %s%5.1fh | %s\n",
+							day.Date.Format("2006-01-02"),
+							day.TargetMinutes/60,
+							day.WorkedMinutes/60,
+							signLabel(diff),
+							math.Abs(diff)/60,
+							statusText)
 					}
+					syncPrintln("\nLegend: '+' = лишнего залогировано, '-' = не хватает; Status=detailed text.")
 				}
-				to = from
+			}
+
+			if !dryRun {
+				syncPrintf("⏳ Step 3/3: filling today (%s)\n", today.Format("2006-01-02"))
+				if _, err := manager.DistributeTimeForDate(today, false, timelines); err != nil {
+					return fmt.Errorf("failed to distribute time: %w", err)
+				}
+				syncPrintln("\n✅ Sync completed: month-to-date backfilled and today logged")
 			} else {
-				return fmt.Errorf("specify --date, --week, --month, or --from/--to")
-			}
-
-			// Load config
-			cfg, err := config.Load(configPath)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-			cfg.ExpandEnvVars()
-
-			// Initialize token manager
-			tokenManager := tracker.NewTokenManager(
-				cfg.IAM.GetRefreshInterval(),
-				cfg.IAM.CLICommand,
-				logger,
-			)
-			if err := tokenManager.Start(); err != nil {
-				return fmt.Errorf("failed to start token manager: %w", err)
-			}
-
-			// Initialize Tracker API client
-			trackerClient := tracker.NewClient(
-				cfg.Tracker.APIEndpoint,
-				cfg.Tracker.OrgID,
-				tokenManager,
-				logger,
-			)
-
-			var worklogs []tracker.Worklog
-			if from.Equal(to) {
-				// Single day
-				worklogs, err = trackerClient.GetWorklogsForToday(from)
-			} else {
-				// Range
-				worklogs, err = trackerClient.GetWorklogsForRange(from, to)
-			}
-
-			if err != nil {
-				return fmt.Errorf("failed to get worklogs: %w", err)
-			}
-
-			// Print report in compact format
-			if len(worklogs) == 0 {
-				fmt.Printf("\nNo worklogs found for period %s - %s\n",
-					from.Format("2006-01-02"),
-					to.Format("2006-01-02"))
-				return nil
-			}
-
-			fmt.Printf("\nWorklogs for %s - %s:\n\n",
-				from.Format("2006-01-02"),
-				to.Format("2006-01-02"))
-
-			// Print worklogs
-			totalMinutes := 0.0
-			for _, wl := range worklogs {
-				minutes, _ := tracker.ParseISO8601Duration(wl.Duration)
-				totalMinutes += minutes
-				hours := int(minutes / 60)
-				mins := int(minutes) % 60
-
-				comment := wl.Comment
-				if comment == "" {
-					comment = "-"
-				}
-
-				fmt.Printf("%s  %-15s  %2dh %2dm  %s\n",
-					wl.Start.In(time.Local).Format("2006-01-02"),
-					wl.Issue.Key,
-					hours, mins,
-					comment)
-			}
-
-			// Print total
-			totalHours := int(totalMinutes / 60)
-			totalMins := int(totalMinutes) % 60
-			fmt.Printf("\nTotal: %dh %dm (%d worklogs)\n", totalHours, totalMins, len(worklogs))
-
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVarP(&dateStr, "date", "d", "", "Single date (today, yesterday, or YYYY-MM-DD)")
-	cmd.Flags().BoolVarP(&week, "week", "w", false, "Current week (Monday-Sunday)")
-	cmd.Flags().BoolVarP(&month, "month", "m", false, "Current month")
-	cmd.Flags().StringVar(&fromStr, "from", "", "Start date (YYYY-MM-DD)")
-	cmd.Flags().StringVar(&toStr, "to", "", "End date (YYYY-MM-DD)")
-
-	return cmd
-}
-
-func weeklyScheduleCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "weekly-schedule",
-		Short: "Show weekly schedule for random tasks",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load config
-			cfg, err := config.Load(configPath)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Load weekly state
-			stateManager := timemanager.NewWeeklyStateManager(cfg.State.WeeklyScheduleFile, logger)
-			if err := stateManager.Load(); err != nil {
-				return fmt.Errorf("failed to load weekly state: %w", err)
-			}
-
-			state := stateManager.GetCurrentState()
-
-			if state == nil || state.Year == 0 {
-				fmt.Println("\nNo weekly schedule yet")
-				fmt.Println("Run 'sync' command to generate schedule for current week")
-				return nil
-			}
-
-			// Print schedule
-			fmt.Printf("\nWeekly Schedule (Week %d, %d):\n", state.Week, state.Year)
-			fmt.Printf("Period: %s - %s\n", state.StartDate, state.EndDate)
-			fmt.Println("═══════════════════════════════════════════════════════")
-
-			for task, dates := range state.SelectedDays {
-				fmt.Printf("\n  %s:\n", task)
-				for _, dateStr := range dates {
-					date, _ := time.Parse("2006-01-02", dateStr)
-					weekday := date.Weekday().String()
-					fmt.Printf("    • %s (%s)\n", dateStr, weekday)
-				}
-			}
-
-			fmt.Println()
-
-			return nil
-		},
-	}
-
-	return cmd
-}
-
-func daemonCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "daemon",
-		Short: "Run in daemon mode (continuous background process)",
-		Long:  "Start daemon that automatically distributes time every N hours",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load config
-			cfg, err := config.Load(configPath)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-			cfg.ExpandEnvVars()
-
-			// Initialize components
-			manager, err := initializeManager(cfg)
-			if err != nil {
-				return err
-			}
-
-			// Create daemon with scheduled or interval mode
-			if cfg.Daemon.DailyTime != "" {
-				// New scheduled mode: run at specific time daily
-				hour, minute := cfg.Daemon.GetDailyTime()
-				d := daemon.NewScheduledDaemon(manager, hour, minute, cfg.Daemon.SystemTray, logger)
-
-				logger.Info("Starting daemon in scheduled mode",
-					zap.Int("daily_hour", hour),
-					zap.Int("daily_minute", minute),
-					zap.Bool("system_tray", cfg.Daemon.SystemTray))
-
-				if !cfg.Daemon.SystemTray {
-					fmt.Printf("🤖 Daemon started in scheduled mode\n")
-					fmt.Printf("   Daily sync at: %02d:%02d MSK (UTC+3)\n", hour, minute)
-					fmt.Println("Press Ctrl+C to stop")
-				}
-
-				if err := d.Start(); err != nil {
-					return fmt.Errorf("daemon failed: %w", err)
-				}
-			} else {
-				// Legacy interval mode: check every N hours
-				d := daemon.NewDaemon(manager, cfg.Daemon.GetCheckInterval(), logger)
-
-				logger.Info("Starting daemon in interval mode",
-					zap.Duration("check_interval", cfg.Daemon.GetCheckInterval()))
-
-				fmt.Printf("🤖 Daemon started in interval mode (checking every %s)\n", cfg.Daemon.GetCheckInterval())
-				fmt.Println("Press Ctrl+C to stop")
-
-				if err := d.Start(); err != nil {
-					return fmt.Errorf("daemon failed: %w", err)
-				}
+				syncPrintln("\n[DRY RUN] No worklogs were created")
 			}
 
 			return nil
 		},
 	}
 
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview actions without creating worklogs")
+	cmd.Flags().StringVar(&teeOutput, "tee-output", "logs/cli-sync.log", "Mirror sync output to file (empty to disable)")
+
 	return cmd
 }
 
-func versionCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Show version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("time-tracker-bot version %s\n", version)
-		},
+func syncPrintf(format string, a ...interface{}) {
+	if syncWriter == nil {
+		syncWriter = os.Stdout
 	}
+	fmt.Fprintf(syncWriter, format, a...)
+}
+
+func syncPrintln(a ...interface{}) {
+	if syncWriter == nil {
+		syncWriter = os.Stdout
+	}
+	fmt.Fprintln(syncWriter, a...)
 }
 
 func initializeManager(cfg *config.Config) (*timemanager.Manager, error) {
@@ -490,6 +214,8 @@ func initializeManager(cfg *config.Config) (*timemanager.Manager, error) {
 	tokenManager := tracker.NewTokenManager(
 		cfg.IAM.GetRefreshInterval(),
 		cfg.IAM.CLICommand,
+		cfg.IAM.InitCommand,
+		cfg.IAM.FederationID,
 		logger,
 	)
 
@@ -575,9 +301,9 @@ func initFileLogger(logFile string, level string) (*zap.Logger, error) {
 	// Setup lumberjack for log rotation
 	logWriter := &lumberjack.Logger{
 		Filename:   logFile,
-		MaxSize:    100, // MB
-		MaxBackups: 3,   // Keep max 3 old log files
-		MaxAge:     28,  // days
+		MaxSize:    100,  // MB
+		MaxBackups: 3,    // Keep max 3 old log files
+		MaxAge:     28,   // days
 		Compress:   true, // Compress old logs with gzip
 	}
 
@@ -607,4 +333,21 @@ func getIcon(dryRun bool) string {
 		return "📋"
 	}
 	return "✅"
+}
+
+func signLabel(value float64) string {
+	if value >= 0 {
+		return "+"
+	}
+	return "-"
+}
+
+func dayStatusLabel(diff float64) string {
+	if math.Abs(diff) < 0.01 {
+		return "ok"
+	}
+	if diff > 0 {
+		return fmt.Sprintf("лишнее +%.1fh", diff/60)
+	}
+	return fmt.Sprintf("не хватает %.1fh", math.Abs(diff)/60)
 }

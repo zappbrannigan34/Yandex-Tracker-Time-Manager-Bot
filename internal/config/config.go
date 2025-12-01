@@ -10,12 +10,12 @@ import (
 
 // Config represents application configuration
 type Config struct {
-	Tracker  TrackerConfig  `mapstructure:"tracker"`
-	Calendar CalendarConfig `mapstructure:"calendar"`
+	Tracker   TrackerConfig   `mapstructure:"tracker"`
+	Calendar  CalendarConfig  `mapstructure:"calendar"`
 	TimeRules TimeRulesConfig `mapstructure:"time_rules"`
-	Daemon   DaemonConfig   `mapstructure:"daemon"`
-	IAM      IAMConfig      `mapstructure:"iam"`
-	State    StateConfig    `mapstructure:"state"`
+	Daemon    DaemonConfig    `mapstructure:"daemon"`
+	IAM       IAMConfig       `mapstructure:"iam"`
+	State     StateConfig     `mapstructure:"state"`
 }
 
 // TrackerConfig represents Yandex Tracker configuration
@@ -28,9 +28,9 @@ type TrackerConfig struct {
 
 // CalendarConfig represents calendar configuration
 type CalendarConfig struct {
-	Type         string `mapstructure:"type"` // "isdayoff" or "production-calendar"
-	FallbackURL  string `mapstructure:"fallback_url"` // For isdayoff type (xmlcalendar.ru)
-	CacheTTL     string `mapstructure:"cache_ttl"`
+	Type        string `mapstructure:"type"`         // "isdayoff" or "production-calendar"
+	FallbackURL string `mapstructure:"fallback_url"` // For isdayoff type (xmlcalendar.ru)
+	CacheTTL    string `mapstructure:"cache_ttl"`
 
 	// Legacy fields for production-calendar type (backward compatibility)
 	APIURL       string `mapstructure:"api_url"`
@@ -41,11 +41,11 @@ type CalendarConfig struct {
 
 // TimeRulesConfig represents time distribution rules
 type TimeRulesConfig struct {
-	TargetHoursPerDay     int                 `mapstructure:"target_hours_per_day"`
-	DailyTasks            []DailyTaskConfig   `mapstructure:"daily_tasks"`
-	WeeklyTasks           []WeeklyTaskConfig  `mapstructure:"weekly_tasks"`
-	BoardTasks            BoardTasksConfig    `mapstructure:"board_tasks"`
-	RandomizationPercent  float64             `mapstructure:"randomization_percent"`
+	TargetHoursPerDay    int                `mapstructure:"target_hours_per_day"`
+	DailyTasks           []DailyTaskConfig  `mapstructure:"daily_tasks"`
+	WeeklyTasks          []WeeklyTaskConfig `mapstructure:"weekly_tasks"`
+	BoardTasks           BoardTasksConfig   `mapstructure:"board_tasks"`
+	RandomizationPercent float64            `mapstructure:"randomization_percent"`
 }
 
 // DailyTaskConfig represents a daily task
@@ -57,18 +57,18 @@ type DailyTaskConfig struct {
 
 // WeeklyTaskConfig represents a weekly task
 type WeeklyTaskConfig struct {
-	Issue         string  `mapstructure:"issue"`
-	HoursPerWeek  float64 `mapstructure:"hours_per_week"`
-	DaysPerWeek   int     `mapstructure:"days_per_week"`
-	Description   string  `mapstructure:"description"`
+	Issue        string  `mapstructure:"issue"`
+	HoursPerWeek float64 `mapstructure:"hours_per_week"`
+	DaysPerWeek  int     `mapstructure:"days_per_week"`
+	Description  string  `mapstructure:"description"`
 }
 
 // BoardTasksConfig represents board tasks configuration
 type BoardTasksConfig struct {
-	Enabled                  bool    `mapstructure:"enabled"`
-	BaseMinutesPerDay        int     `mapstructure:"base_minutes_per_day"`
-	RandomizationPercent     float64 `mapstructure:"randomization_percent"`
-	TasksPercent             float64 `mapstructure:"tasks_percent"`
+	Enabled                   bool    `mapstructure:"enabled"`
+	BaseMinutesPerDay         int     `mapstructure:"base_minutes_per_day"`
+	RandomizationPercent      float64 `mapstructure:"randomization_percent"`
+	TasksPercent              float64 `mapstructure:"tasks_percent"`
 	TasksRandomizationPercent float64 `mapstructure:"tasks_randomization_percent"`
 }
 
@@ -85,6 +85,8 @@ type DaemonConfig struct {
 type IAMConfig struct {
 	RefreshInterval string `mapstructure:"refresh_interval"`
 	CLICommand      string `mapstructure:"cli_command"`
+	InitCommand     string `mapstructure:"init_command"`
+	FederationID    string `mapstructure:"federation_id"`
 }
 
 // StateConfig represents state storage configuration

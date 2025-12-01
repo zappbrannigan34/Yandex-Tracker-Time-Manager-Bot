@@ -95,12 +95,17 @@ daemon:
 iam:
   # How often to CHECK if token needs refresh
   # Token will only be refreshed if it expires in less than 1 hour
-  # IAM tokens live up to 12 hours
-  # Recommended: check every 1-6 hours (default: 6h)
-  refresh_interval: "6h"
+  # IAM tokens live up to 12 hours → проверяем каждый час
+  refresh_interval: "1h"
 
   # CLI command to get IAM token
   cli_command: "yc iam create-token"
+
+  # Optional: custom command to initialize yc (for SSO/federation)
+  # init_command: "yc init --federation-id=YOUR_FEDERATION_ID"
+
+  # Optional: federation ID to append to default init command
+  # federation_id: "YOUR_FEDERATION_ID"
 
 # State Storage
 state:

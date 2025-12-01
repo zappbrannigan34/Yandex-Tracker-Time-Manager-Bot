@@ -11,6 +11,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const cleanupEpsilonMinutes = 0.5
+
 // Manager manages time distribution logic
 type Manager struct {
 	config        *config.Config
@@ -39,19 +41,28 @@ func NewManager(
 	logger *zap.Logger,
 ) *Manager {
 	return &Manager{
-		config:       cfg,
+		config:        cfg,
 		trackerClient: trackerClient,
-		calendar:     cal,
-		weeklyState:  weeklyState,
-		logger:       logger,
+		calendar:      cal,
+		weeklyState:   weeklyState,
+		logger:        logger,
 	}
 }
 
-// DistributeTimeForDate distributes time for the given date
-func (m *Manager) DistributeTimeForDate(date time.Time, dryRun bool) ([]tracker.TimeEntry, error) {
+// DistributeTimeForDate distributes time for the given date using historical timelines
+func (m *Manager) DistributeTimeForDate(date time.Time, dryRun bool, timelines map[string]*StatusTimeline) ([]tracker.TimeEntry, error) {
 	m.logger.Info("Starting time distribution",
 		zap.Time("date", date),
 		zap.Bool("dry_run", dryRun))
+
+	if timelines == nil {
+		var err error
+		startOfMonth := time.Date(date.Year(), date.Month(), 1, 0, 0, 0, 0, date.Location())
+		timelines, err = m.buildStatusTimelines(startOfMonth, date)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build status timelines: %w", err)
+		}
+	}
 
 	// 1. Check if it's a working day
 	isWorkday, targetHours, err := m.calendar.IsWorkday(date)
@@ -138,59 +149,51 @@ func (m *Manager) DistributeTimeForDate(date time.Time, dryRun bool) ([]tracker.
 			zap.Float64("remaining_minutes", remainingMinutes))
 	}
 
-	// 5. Get open issues from board
+	// 5. Distribute remaining time based on historical timelines
 	if remainingMinutes > 0 {
-		issues, err := m.trackerClient.SearchIssues(m.config.Tracker.IssuesQuery)
-		if err != nil {
-			return nil, fmt.Errorf("failed to search issues: %w", err)
-		}
+		inProgressIssues := issuesInProgressOnDate(date, timelines)
+		m.logger.Info("Issues in progress from history",
+			zap.Time("date", date),
+			zap.Int("count", len(inProgressIssues)),
+			zap.Strings("issues", inProgressIssues))
 
-		// Log all found issues before filtering
-		issueKeys := []string{}
-		issueTypes := make(map[string]string)   // key -> type
-		issueStatuses := make(map[string]string) // key -> status
-		for _, issue := range issues {
-			issueKeys = append(issueKeys, issue.Key)
-			if issue.Type != nil {
-				issueTypes[issue.Key] = issue.Type.Key
+		if len(inProgressIssues) > 0 {
+			fixedTasks := make(map[string]bool)
+			for _, task := range m.config.TimeRules.DailyTasks {
+				fixedTasks[task.Issue] = true
+			}
+			for _, task := range m.config.TimeRules.WeeklyTasks {
+				fixedTasks[task.Issue] = true
+			}
+
+			filtered := []string{}
+			for _, issueKey := range inProgressIssues {
+				if !fixedTasks[issueKey] {
+					filtered = append(filtered, issueKey)
+				}
+			}
+
+			if len(filtered) > 0 {
+				minutesPerIssue := remainingMinutes / float64(len(filtered))
+				for _, issueKey := range filtered {
+					minutes := random.Randomize(minutesPerIssue, m.config.TimeRules.RandomizationPercent)
+					entries = append(entries, tracker.TimeEntry{
+						IssueKey: issueKey,
+						Minutes:  minutes,
+						Comment:  "Development work",
+					})
+				}
+
+				m.logger.Info("Remaining time distributed to historical in-progress issues",
+					zap.Float64("minutes_per_issue", minutesPerIssue),
+					zap.Int("issue_count", len(filtered)))
 			} else {
-				issueTypes[issue.Key] = "unknown"
+				m.logger.Warn("No non-fixed in-progress issues available for distribution",
+					zap.Time("date", date))
 			}
-			issueStatuses[issue.Key] = issue.Status.Key
-		}
-		m.logger.Info("Issues from API (before excluding fixed tasks)",
-			zap.Strings("issues", issueKeys),
-			zap.Any("types", issueTypes),
-			zap.Any("statuses", issueStatuses))
-
-		// Exclude fixed tasks (daily + weekly)
-		issues = m.excludeFixedTasks(issues)
-
-		// Log after filtering
-		filteredKeys := []string{}
-		for _, issue := range issues {
-			filteredKeys = append(filteredKeys, issue.Key)
-		}
-		m.logger.Info("Open issues found (after excluding fixed tasks)",
-			zap.Strings("issues", filteredKeys),
-			zap.Int("count", len(issues)))
-
-		// 6. Distribute remaining time
-		if len(issues) > 0 {
-			minutesPerIssue := remainingMinutes / float64(len(issues))
-
-			for _, issue := range issues {
-				minutes := random.Randomize(minutesPerIssue, m.config.TimeRules.RandomizationPercent)
-				entries = append(entries, tracker.TimeEntry{
-					IssueKey: issue.Key,
-					Minutes:  minutes,
-					Comment:  "Development work",
-				})
-			}
-
-			m.logger.Info("Remaining time distributed to open issues",
-				zap.Float64("minutes_per_issue", minutesPerIssue),
-				zap.Int("issue_count", len(issues)))
+		} else {
+			m.logger.Warn("No in-progress issues found in history for date",
+				zap.Time("date", date))
 		}
 	}
 
@@ -394,6 +397,7 @@ type BackfillResult struct {
 	ProcessedDays int
 	TotalEntries  int
 	TotalMinutes  float64
+	Duration      time.Duration
 	DayResults    []DayBackfillResult
 }
 
@@ -406,8 +410,39 @@ type DayBackfillResult struct {
 	Entries      []tracker.TimeEntry
 }
 
-// BackfillPeriod fills missing time entries for a period using 120% coverage algorithm
-func (m *Manager) BackfillPeriod(from, to time.Time, dryRun bool) (*BackfillResult, error) {
+// NormalizationSummary describes automatic cleanup activity for a range
+type NormalizationSummary struct {
+	ProcessedDays       int
+	NormalizedDays      int
+	TotalMinutesTrimmed float64
+	Duration            time.Duration
+}
+
+// MonthlyStatus represents aggregated statistics for a period
+type MonthlyStatus struct {
+	From          time.Time
+	To            time.Time
+	WorkingDays   int
+	TargetMinutes float64
+	WorkedMinutes float64
+	Daily         []DailyStatus
+}
+
+func (ms *MonthlyStatus) RemainingMinutes() float64 {
+	return ms.TargetMinutes - ms.WorkedMinutes
+}
+
+// DailyStatus represents per-day stats
+type DailyStatus struct {
+	Date          time.Time
+	TargetMinutes float64
+	WorkedMinutes float64
+}
+
+// BackfillPeriod fills missing time entries for a period using 120% coverage algorithm.
+// Timelines can be provided to avoid rebuilding; when nil they will be computed and returned.
+func (m *Manager) BackfillPeriod(from, to time.Time, dryRun bool, timelines map[string]*StatusTimeline) (*BackfillResult, map[string]*StatusTimeline, error) {
+	start := time.Now()
 	m.logger.Info("Starting backfill with 120% coverage algorithm",
 		zap.Time("from", from),
 		zap.Time("to", to),
@@ -416,61 +451,31 @@ func (m *Manager) BackfillPeriod(from, to time.Time, dryRun bool) (*BackfillResu
 	// Step 1: Find missing workdays
 	missingDays, err := m.findMissingWorkdays(from, to)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find missing workdays: %w", err)
+		return nil, nil, fmt.Errorf("failed to find missing workdays: %w", err)
 	}
 
 	if len(missingDays) == 0 {
 		m.logger.Info("No missing workdays found")
-		return &BackfillResult{
+		result := &BackfillResult{
 			ProcessedDays: 0,
 			TotalEntries:  0,
 			TotalMinutes:  0,
 			DayResults:    []DayBackfillResult{},
-		}, nil
+		}
+		result.Duration = time.Since(start)
+		return result, timelines, nil
 	}
 
 	m.logger.Info("Found missing workdays",
 		zap.Int("count", len(missingDays)))
 
-	// Step 2: Collect all tasks from 3 sources (120% coverage)
-	allIssueKeys, err := m.collectAllRelevantIssues(from, to)
-	if err != nil {
-		return nil, fmt.Errorf("failed to collect relevant issues: %w", err)
-	}
-
-	m.logger.Info("Collected unique issue keys from all sources",
-		zap.Int("count", len(allIssueKeys)),
-		zap.Strings("keys", allIssueKeys))
-
-	// Step 3: Build timeline for each issue
-	timelines := make(map[string]*StatusTimeline)
-	boardID := m.config.Tracker.BoardID
-
-	for _, issueKey := range allIssueKeys {
-		// Get changelog
-		changelog, err := m.trackerClient.GetChangelog(issueKey)
-		if err != nil {
-			m.logger.Warn("Failed to get changelog, skipping issue",
-				zap.String("issue", issueKey),
-				zap.Error(err))
-			continue
+	// Step 2/3: Build or reuse timelines for all relevant issues
+	if timelines == nil {
+		var buildErr error
+		timelines, buildErr = m.buildStatusTimelines(from, to)
+		if buildErr != nil {
+			return nil, nil, buildErr
 		}
-
-		// Build timeline
-		timeline := buildStatusTimeline(issueKey, changelog)
-
-		// Check if issue was on board
-		if !wasOnBoard(changelog, boardID) {
-			m.logger.Debug("Issue was never on board, skipping",
-				zap.String("issue", issueKey),
-				zap.Int("board_id", boardID))
-			continue
-		}
-
-		timelines[issueKey] = timeline
-		m.logger.Debug("Timeline built for issue",
-			zap.String("issue", issueKey),
-			zap.Int("changes", len(timeline.Changes)))
 	}
 
 	m.logger.Info("Timelines built",
@@ -508,7 +513,9 @@ func (m *Manager) BackfillPeriod(from, to time.Time, dryRun bool) (*BackfillResu
 		zap.Int("total_entries", result.TotalEntries),
 		zap.Float64("total_minutes", result.TotalMinutes))
 
-	return result, nil
+	result.Duration = time.Since(start)
+
+	return result, timelines, nil
 }
 
 // collectAllRelevantIssues collects issues from 3 sources (120% coverage)
@@ -524,10 +531,9 @@ func (m *Manager) collectAllRelevantIssues(from, to time.Time) ([]string, error)
 		zap.Strings("keys", worklogKeys))
 
 	// Source 2: Current board (tasks on board now)
-	boardQuery := fmt.Sprintf("Boards: %d AND Assignee: me()", m.config.Tracker.BoardID)
-	boardIssues, err := m.trackerClient.SearchIssues(boardQuery)
+	boardIssues, err := m.trackerClient.GetAllBoardIssues(m.config.Tracker.BoardID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to search board issues: %w", err)
+		return nil, fmt.Errorf("failed to get board issues: %w", err)
 	}
 	boardKeys := []string{}
 	for _, issue := range boardIssues {
@@ -537,23 +543,9 @@ func (m *Manager) collectAllRelevantIssues(from, to time.Time) ([]string, error)
 		zap.Int("count", len(boardKeys)),
 		zap.Strings("keys", boardKeys))
 
-	// Source 3: Updated since start of period
-	updatedQuery := fmt.Sprintf("Assignee: me() AND Updated: >= %s", from.Format("2006-01-02"))
-	updatedIssues, err := m.trackerClient.SearchIssues(updatedQuery)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search updated issues: %w", err)
-	}
-	updatedKeys := []string{}
-	for _, issue := range updatedIssues {
-		updatedKeys = append(updatedKeys, issue.Key)
-	}
-	m.logger.Info("Source 3: Updated filter",
-		zap.Int("count", len(updatedKeys)),
-		zap.Strings("keys", updatedKeys))
-
-	// Merge all sources
-	allKeys := mergeUnique(worklogKeys, boardKeys, updatedKeys)
-	m.logger.Info("Merged all sources (120% coverage)",
+	// Merge sources
+	allKeys := mergeUnique(worklogKeys, boardKeys)
+	m.logger.Info("Merged sources (worklogs + board)",
 		zap.Int("total_unique", len(allKeys)))
 
 	return allKeys, nil
@@ -589,13 +581,7 @@ func (m *Manager) backfillDay(date time.Time, timelines map[string]*StatusTimeli
 	}
 
 	// Find tasks that were "inProgress" on this day
-	inProgressIssues := []string{}
-	for issueKey, timeline := range timelines {
-		status := timeline.StatusOnDate(date)
-		if status == "inProgress" {
-			inProgressIssues = append(inProgressIssues, issueKey)
-		}
-	}
+	inProgressIssues := issuesInProgressOnDate(date, timelines)
 
 	m.logger.Info("Tasks in progress on date",
 		zap.Time("date", date),
@@ -697,6 +683,79 @@ func (m *Manager) backfillDay(date time.Time, timelines map[string]*StatusTimeli
 		TotalMinutes: totalMinutes,
 		Entries:      entries,
 	}, nil
+}
+
+// GetMonthlyStatus calculates month-to-date statistics between from and to (inclusive)
+func (m *Manager) GetMonthlyStatus(from, to time.Time) (*MonthlyStatus, error) {
+	if to.Before(from) {
+		return nil, fmt.Errorf("invalid range: to date is before from date")
+	}
+
+	status := &MonthlyStatus{
+		From:  from,
+		To:    to,
+		Daily: []DailyStatus{},
+	}
+
+	// Calculate target minutes based on calendar (handles shortened days)
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		isWorkday, hours, err := m.calendar.IsWorkday(d)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check workday for %s: %w", d.Format("2006-01-02"), err)
+		}
+		if !isWorkday || hours == 0 {
+			continue
+		}
+		status.WorkingDays++
+		status.TargetMinutes += float64(hours * 60)
+	}
+
+	// Sum worked minutes from Tracker worklogs
+	worklogs, err := m.trackerClient.GetWorklogsForRange(from, to)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worklogs for range: %w", err)
+	}
+
+	// Aggregate worked minutes per day
+	dailyWorked := make(map[string]float64)
+	for _, wl := range worklogs {
+		minutes, parseErr := tracker.ParseISO8601Duration(wl.Duration)
+		if parseErr != nil {
+			m.logger.Warn("Failed to parse worklog duration",
+				zap.String("worklog_id", wl.ID.String()),
+				zap.String("duration", wl.Duration),
+				zap.Error(parseErr))
+			continue
+		}
+		dayKey := wl.Start.In(time.Local).Format("2006-01-02")
+		dailyWorked[dayKey] += minutes
+	}
+
+	// Build daily breakdown in order
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		dayKey := d.Format("2006-01-02")
+		targetMinutes := 0.0
+		isWorkday, hours, err := m.calendar.IsWorkday(d)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check workday for %s: %w", dayKey, err)
+		}
+		if isWorkday {
+			targetMinutes = float64(hours * 60)
+		}
+		worked := dailyWorked[dayKey]
+		if worked > 0 {
+			status.WorkedMinutes += worked
+		}
+		if targetMinutes > 0 || worked > 0 {
+			status.Daily = append(status.Daily, DailyStatus{
+				Date:          d,
+				TargetMinutes: targetMinutes,
+				WorkedMinutes: worked,
+			})
+		}
+	}
+
+	return status, nil
 }
 
 // cleanupAndNormalize removes duplicates and normalizes to EXACTLY target (100%)
