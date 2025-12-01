@@ -6,6 +6,8 @@ param(
     [string]$LogPath,
     [int]$IntervalHours = 2,
     [int]$StartDelayMinutes = 5,
+    [switch]$UseSystemAccount,
+    [string]$UserName,
     [switch]$DryRun
 )
 
@@ -36,10 +38,17 @@ function Build-Action {
     $quotedConfig = '"' + $ConfigPath + '"'
     $quotedLog = '"' + $LogPath + '"'
     $args = "sync --config $quotedConfig --tee-output $quotedLog"
+
+    $escapedExe = $ExePath.Replace("'", "''")
+    $escapedArgs = $args.Replace("'", "''")
+    $escapedWorkDir = $ProjectRoot.Replace("'", "''")
+
+    $psCommand = "Start-Process -FilePath '$escapedExe' -ArgumentList '$escapedArgs' -WorkingDirectory '$escapedWorkDir' -WindowStyle Hidden -Wait"
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($psCommand))
+
     return New-ScheduledTaskAction `
-        -Execute $ExePath `
-        -Argument $args `
-        -WorkingDirectory $ProjectRoot
+        -Execute "powershell.exe" `
+        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $encoded"
 }
 
 function Build-Trigger {
@@ -63,11 +72,27 @@ function Build-Settings {
         -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 }
 
+function Build-Principal {
+    if ($UseSystemAccount) {
+        return New-ScheduledTaskPrincipal `
+            -UserId "SYSTEM" `
+            -LogonType ServiceAccount `
+            -RunLevel Highest
+    }
+
+    $resolvedUser = if ($UserName) { $UserName } else { "$env:USERDOMAIN\$env:USERNAME" }
+    return New-ScheduledTaskPrincipal `
+        -UserId $resolvedUser `
+        -LogonType Interactive `
+        -RunLevel Highest
+}
+
 function Register-SyncTask {
     param(
         [Microsoft.Management.Infrastructure.CimInstance]$Action,
         [Microsoft.Management.Infrastructure.CimInstance]$Trigger,
-        [Microsoft.Management.Infrastructure.CimInstance]$Settings
+        [Microsoft.Management.Infrastructure.CimInstance]$Settings,
+        [Microsoft.Management.Infrastructure.CimInstance]$Principal
     )
 
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -81,8 +106,7 @@ function Register-SyncTask {
         -Action $Action `
         -Trigger $Trigger `
         -Settings $Settings `
-        -RunLevel Highest `
-        -User "SYSTEM"
+        -Principal $Principal
 }
 
 try {
@@ -90,6 +114,7 @@ try {
     $action = Build-Action
     $trigger = Build-Trigger
     $settings = Build-Settings
+    $principal = Build-Principal
 
     if ($DryRun) {
         Write-Host "Dry-run mode: would register task with the following parameters:`n" -ForegroundColor Cyan
@@ -99,11 +124,14 @@ try {
         Write-Host ("Log file : {0}" -f $LogPath)
         Write-Host ("Interval : every {0} hour(s)" -f $IntervalHours)
         Write-Host ("Start in : {0} minute(s)" -f $StartDelayMinutes)
+        $principalInfo = if ($UseSystemAccount) { "SYSTEM" } else { if ($UserName) { $UserName } else { "$env:USERDOMAIN\$env:USERNAME" } }
+        Write-Host ("Account  : {0}" -f $principalInfo)
         return
     }
 
-    Register-SyncTask -Action $action -Trigger $trigger -Settings $settings
-    Write-Host "Scheduled task '$TaskName' registered. It will run every $IntervalHours hour(s) under SYSTEM without opening a console window." -ForegroundColor Green
+    Register-SyncTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
+    $targetAccount = if ($UseSystemAccount) { "SYSTEM" } else { if ($UserName) { $UserName } else { "$env:USERDOMAIN\$env:USERNAME" } }
+    Write-Host "Scheduled task '$TaskName' registered. It will run every $IntervalHours hour(s) under $targetAccount without opening a console window." -ForegroundColor Green
 }
 catch {
     Write-Error $_

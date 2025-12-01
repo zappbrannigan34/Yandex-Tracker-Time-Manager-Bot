@@ -339,15 +339,16 @@ state:
 
 ## ⏱️ Автозапуск (Windows Task Scheduler)
 
-Для полностью беззвучного запуска каждые 2 часа добавлен скрипт [`scripts/register-sync-task.ps1`](./scripts/register-sync-task.ps1). Он регистрирует задачу планировщика, запускающую `time-tracker-bot.exe sync` под `SYSTEM` без всплывающей консоли и с логом в `logs\scheduler-sync.log`.
+Для полностью беззвучного запуска каждые 2 часа добавлен скрипт [`scripts/register-sync-task.ps1`](./scripts/register-sync-task.ps1). Он регистрирует задачу планировщика, которая запускает бота через скрытый `powershell.exe` (окно не появляется) и пишет отчёт в `logs\scheduler-sync.log`.
 
 ```powershell
 cd C:\path\to\time-tracker-bot
-.\scripts\register-sync-task.ps1           # регистрирует задачу TimeTrackerSync
-.\scripts\register-sync-task.ps1 -DryRun   # показать параметры без регистрации
+.\scripts\register-sync-task.ps1                      # регистрирует задачу от текущего пользователя
+.\scripts\register-sync-task.ps1 -DryRun              # показать параметры без регистрации
+.\scripts\register-sync-task.ps1 -UseSystemAccount    # вернуть режим SYSTEM (если нужна служба без входа)
 ```
 
-Параметры можно переопределять: `-TaskName`, `-IntervalHours`, `-ConfigPath`, `-LogPath` и т.д. Если задача с таким именем уже есть, скрипт аккуратно пересоздаёт её.
+По умолчанию задача выполняется от имени пользователя, который запускает скрипт (используются его `yc init`/SSO). Флаг `-UseSystemAccount` возвращает прежнее поведение. Дополнительно можно задать `-TaskName`, `-IntervalHours`, `-ConfigPath`, `-LogPath`, `-UserName`. Если задача уже есть, скрипт пересоздаёт её автоматически.
 
 ---
 
