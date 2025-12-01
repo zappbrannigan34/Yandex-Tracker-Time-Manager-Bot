@@ -46,7 +46,8 @@ function Build-Trigger {
     $startTime = (Get-Date).AddMinutes($StartDelayMinutes)
     $interval = New-TimeSpan -Hours $IntervalHours
     return New-ScheduledTaskTrigger `
-        -Once $startTime `
+        -Once `
+        -At $startTime `
         -RepetitionInterval $interval `
         -RepetitionDuration ([TimeSpan]::MaxValue)
 }
