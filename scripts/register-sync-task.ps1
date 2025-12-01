@@ -45,11 +45,14 @@ function Build-Action {
 function Build-Trigger {
     $startTime = (Get-Date).AddMinutes($StartDelayMinutes)
     $interval = New-TimeSpan -Hours $IntervalHours
+    # Windows Task Scheduler требует конечную длительность повторений.
+    # 10 лет (3650 дней) ≈ бесконечность для нашего сценария и не вызывает ошибок.
+    $duration = New-TimeSpan -Days 3650
     return New-ScheduledTaskTrigger `
         -Once `
         -At $startTime `
         -RepetitionInterval $interval `
-        -RepetitionDuration ([TimeSpan]::MaxValue)
+        -RepetitionDuration $duration
 }
 
 function Build-Settings {
