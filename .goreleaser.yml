@@ -23,20 +23,6 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
-  # Daemon binary (Windows only, GUI subsystem)
-  - id: daemon-windows
-    main: ./cmd/time-tracker-bot
-    binary: time-tracker-bot-daemon
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - windows
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X main.version={{.Version}} -H windowsgui
-
 archives:
   # Main archives (CLI binary only)
   - id: default
@@ -51,20 +37,6 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
-    files:
-      - README.md
-      - config.example.yaml
-
-  # Separate archive for Windows daemon binary
-  - id: daemon
-    builds:
-      - daemon-windows
-    format: zip
-    name_template: >-
-      {{ .ProjectName }}-daemon_
-      {{- .Version }}_
-      {{- .Os }}_
-      {{- .Arch }}
     files:
       - README.md
       - config.example.yaml
